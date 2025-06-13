@@ -518,8 +518,8 @@ def merge_files(inprefix, outfile, header, r):
               " | sort -u | sed '1s/^/" + header + "\\n/' > " +
               outfile)
 
-    for i in range(r):
-        os.remove(inprefix + "." + str(i))
+    #for i in range(r):
+    #    os.remove(inprefix + "." + str(i))
 
 
 def hybridization_positions(dotbracket1, dotbracket2):
