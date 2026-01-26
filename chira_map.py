@@ -69,23 +69,33 @@ def write_mapped_bed(bam, bed, fasta, stranded):
                     fh_unmapped_fasta.write(prev_fasta)
                 prev_unmapped = True
 
-            readseq = alignment.get_forward_sequence()
-
-            prev_fasta = ">" + readid + "\n" + readseq + "\n"
+            # Only get sequence when needed (for unmapped reads)
+            readseq = None
             prev_readid = readid
 
             if alignment.is_unmapped:
+                # Only get sequence for unmapped reads
+                readseq = alignment.get_forward_sequence()
+                prev_fasta = f">{readid}\n{readseq}\n"
                 continue
+            
             optimal_alignment_len = 0
+            # Check if primary alignment is on desired strand (cache the result)
+            is_desired_strand = (stranded == "both" or 
+                                (stranded == "rc" and alignment.is_reverse) or 
+                                (stranded == "fw" and not alignment.is_reverse))
+            
             # write the alignment only if it mapped on desired strand
-            if (stranded == "rc" and alignment.is_reverse) or \
-                    (stranded == "fw" and not alignment.is_reverse) or \
-                    stranded == "both":
+            if is_desired_strand:
+                # Cache string conversions
+                ref_start_str = str(alignment.reference_start)
+                ref_end_str = str(alignment.reference_end)
+                strand_char = "-" if alignment.is_reverse else "+"
                 fh_mapped_bed.write(chira_utilities.bedentry(alignment.reference_name,
-                                                             str(alignment.reference_start),
-                                                             str(alignment.reference_end),
+                                                             ref_start_str,
+                                                             ref_end_str,
                                                              readid,
-                                                             "-" if alignment.is_reverse else "+",
+                                                             strand_char,
                                                              alignment.cigarstring) + "\n")
                 prev_unmapped = False
                 optimal_alignment_len = alignment.query_alignment_length
@@ -94,42 +104,62 @@ def write_mapped_bed(bam, bed, fasta, stranded):
             if not alignment.has_tag('XA'):
                 continue
 
-            alt_alignments = alignment.get_tag('XA').rstrip(';').split(';')
-            # either optimal_alignment_len already set or there must be at least a secondary alignment on desired strand
-            # if optimal_alignment_len == 0:
+            xa_tag = alignment.get_tag('XA')
+            # Optimize: only rstrip if needed, avoid empty splits
+            if xa_tag.endswith(';'):
+                alt_alignments = xa_tag[:-1].split(';')
+            else:
+                alt_alignments = xa_tag.split(';')
+            
+            # Pre-parse all alternate alignments to avoid duplicate processing
+            parsed_alt_alignments = []
             for alt_alignment in alt_alignments:
-                f_alt_align = alt_alignment.split(',')
-                # check if it mapped on desired strand
-                if (f_alt_align[1].startswith('-') and stranded == "fw") or \
-                        (f_alt_align[1].startswith('+') and stranded == "rc"):
+                if not alt_alignment:  # Skip empty strings
                     continue
+                f_alt_align = alt_alignment.split(',', 2)  # Only split first 2 commas, rest is cigar
+                if len(f_alt_align) < 3:
+                    continue
+                alt_refstrand = f_alt_align[1][0]  # '+' or '-'
+                # Check if it mapped on desired strand
+                if (alt_refstrand == '-' and stranded == "fw") or \
+                        (alt_refstrand == '+' and stranded == "rc"):
+                    continue
+                
+                alt_referenceid = f_alt_align[0]
+                alt_refstart_str = f_alt_align[1]
+                alt_refstart = alt_refstart_str[1:]  # Remove strand character
                 alt_cigar = f_alt_align[2]
-                alt_nm = int(f_alt_align[-1])
+                alt_is_reverse = (alt_refstrand == '-')
+                
+                # Cache alignment length calculation
                 alt_alignment_len = chira_utilities.alignment_length(alt_cigar)
+                
+                # Track optimal length
                 if alt_alignment_len > optimal_alignment_len:
                     optimal_alignment_len = alt_alignment_len
-            # now examine XA tag for alternate alignments
-            for alt_alignment in alt_alignments:
-                f_alt_align = alt_alignment.split(',')
-                # check if it mapped on desired strand
-                if f_alt_align[1].startswith('-') and stranded == "fw" or \
-                        f_alt_align[1].startswith('+') and stranded == "rc":
+                
+                # Store parsed data for later use
+                parsed_alt_alignments.append({
+                    'refid': alt_referenceid,
+                    'refstart': alt_refstart,
+                    'refstart_int': int(alt_refstart),  # Pre-convert to int
+                    'refstrand': alt_refstrand,
+                    'cigar': alt_cigar,
+                    'is_reverse': alt_is_reverse,
+                    'length': alt_alignment_len
+                })
+            
+            # Now write only alignments that meet the optimal length threshold
+            for alt in parsed_alt_alignments:
+                if alt['length'] < optimal_alignment_len:
                     continue
-                alt_referenceid = f_alt_align[0]
-                alt_refstart = f_alt_align[1][1:]
-                alt_refstrand = f_alt_align[1][0]
-                alt_cigar = f_alt_align[2]
-                alt_refend = chira_utilities.alignment_end(alt_refstart, alt_cigar, f_alt_align[1].startswith("-"))
-                alt_alignment_len = chira_utilities.alignment_length(alt_cigar)
-
-                if alt_alignment_len < optimal_alignment_len:
-                    continue
-                fh_mapped_bed.write(chira_utilities.bedentry(alt_referenceid,
-                                                             str(int(alt_refstart)-1),
+                alt_refend = chira_utilities.alignment_end(alt['refstart'], alt['cigar'], alt['is_reverse'])
+                fh_mapped_bed.write(chira_utilities.bedentry(alt['refid'],
+                                                             str(alt['refstart_int'] - 1),
                                                              str(alt_refend),
                                                              readid,
-                                                             alt_refstrand,
-                                                             alt_cigar) + "\n")
+                                                             alt['refstrand'],
+                                                             alt['cigar']) + "\n")
                 prev_unmapped = False
 
         if prev_unmapped:
@@ -174,30 +204,64 @@ def clan_to_bed(outdir):
     with open(os.path.join(outdir, "out.map")) as fh_in, open(os.path.join(outdir, "mapped.bed"), "w") as fh_out:
         next(fh_in)
         for line in fh_in:
-            [read_id,
-             solution_id,
-             read_mapped_begin,
-             read_mapped_end,
-             read_length,
-             mapped_locations] = line.rstrip("\n").rstrip("\t").split("\t")
-            lead_soft_clips = int(read_mapped_begin) - 1
-            trail_soft_clips = int(read_length) - int(read_mapped_end)
-            cigar = ""
-            if lead_soft_clips != 0:
-                cigar += str(lead_soft_clips) + "S"
-            cigar += str(int(read_mapped_end) - int(read_mapped_begin) + 1) + "M"
-            if trail_soft_clips != 0:
-                cigar += str(trail_soft_clips) + "S"
+            # Use rstrip once and split once
+            fields = line.rstrip("\n\t").split("\t")
+            if len(fields) < 6:
+                continue
+            read_id = fields[0]
+            read_mapped_begin = int(fields[2])
+            read_mapped_end = int(fields[3])
+            read_length = int(fields[4])
+            mapped_locations = fields[5]
+            
+            # Build cigar string more efficiently
+            lead_soft_clips = read_mapped_begin - 1
+            match_len = read_mapped_end - read_mapped_begin + 1
+            trail_soft_clips = read_length - read_mapped_end
+            
+            cigar_parts = []
+            if lead_soft_clips > 0:
+                cigar_parts.append(f"{lead_soft_clips}S")
+            cigar_parts.append(f"{match_len}M")
+            if trail_soft_clips > 0:
+                cigar_parts.append(f"{trail_soft_clips}S")
+            cigar = "".join(cigar_parts)
 
-            for mapped_location in mapped_locations.split(";"):
+            # Pre-compute common parts
+            ref_start_str = str(read_mapped_begin - 1)
+            read_desc_base = ",".join([read_id, "", ref_start_str, "", "+", cigar])
+            
+            # Pre-split mapped_locations to avoid repeated splitting
+            if mapped_locations:
+                location_list = mapped_locations.split(";")
+            else:
+                continue
+            
+            for mapped_location in location_list:
+                if not mapped_location:
+                    continue
                 d = mapped_location.split(":")
+                if len(d) < 2:
+                    continue
                 # if header has spaces select the id only
-                ref_id = ":".join(d[0:-1]).split(' ')[0]
-                [ref_start, ref_end] = d[-1].split("-")
-                # NOTE: at the moment there is no way to findout which strand it is mapping to
-                fh_out.write("\t".join([ref_id, str(int(ref_start)-1), ref_end,
-                                        ",".join([read_id, ref_id, str(int(ref_start)-1), ref_end, "+", cigar]),
-                                        "1", "+"]) + "\n")
+                ref_id = d[0].split(' ')[0] if len(d) == 2 else ":".join(d[0:-1]).split(' ')[0]
+                # Parse start-end more efficiently
+                last_part = d[-1]
+                if "-" in last_part:
+                    ref_start, ref_end = last_part.split("-", 1)
+                    ref_start_int = int(ref_start) - 1
+                else:
+                    if len(d) >= 2:
+                        ref_start = d[-2] if len(d) > 2 else d[0]
+                        ref_start_int = int(ref_start) - 1
+                    else:
+                        continue
+                    ref_end = last_part
+                
+                # Build bed entry more efficiently using f-string
+                read_desc = ",".join([read_id, ref_id, ref_start_str, ref_end, "+", cigar])
+                bed_entry = f"{ref_id}\t{ref_start_int}\t{ref_end}\t{read_desc}\t1\t+\n"
+                fh_out.write(bed_entry)
 
 
 if __name__ == "__main__":
@@ -306,7 +370,7 @@ if __name__ == "__main__":
                         dest='chimeric_overlap',
                         help='Maximum number of bases allowed between the chimeric segments of a read')
 
-    parser.add_argument('-v', '--version', action='version', version='%(prog)s 1.4.3')
+    parser.add_argument('-v', '--version', action='version', version='%(prog)s 1.4.4')
 
     args = parser.parse_args()
     print('Query fasta                          : ' + args.fasta)

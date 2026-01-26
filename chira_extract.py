@@ -256,6 +256,29 @@ def extract_and_write(readid, l_read_alignments, l_loci_bed, d_ref_lengths1, d_r
                     tx_len1 = d_reflen2[transcriptid1]
                     tx_len2 = d_reflen1[transcriptid2]
 
+        # Determine if miRNA is first or last in the read
+        # Check if region1 or region2 is miRNA
+        is_mirna1 = region1 in ["miRNA", "3p_mature_mir", "5p_mature_mir", "mature_mir"]
+        is_mirna2 = region2 in ["miRNA", "3p_mature_mir", "5p_mature_mir", "mature_mir"]
+        
+        # Determine read orientation based on arm positions
+        if arm1_start < arm2_start:
+            # arm1 (locus1) is at 5' end
+            if is_mirna1:
+                mirna_position = "miRNA_first"
+            elif is_mirna2:
+                mirna_position = "miRNA_last"
+            else:
+                mirna_position = "NA"  # Neither is miRNA (shouldn't happen in typical split reference)
+        else:
+            # arm2 (locus2) is at 5' end
+            if is_mirna2:
+                mirna_position = "miRNA_first"
+            elif is_mirna1:
+                mirna_position = "miRNA_last"
+            else:
+                mirna_position = "NA"  # Neither is miRNA (shouldn't happen in typical split reference)
+        
         chimera = [readid, transcriptid1, transcriptid2,
                    geneid1, geneid2, name1, name2, region1, region2,
                    str(tx_pos_start1), str(tx_pos_end1), tx_pos_strand1, str(tx_len1),
@@ -265,7 +288,8 @@ def extract_and_write(readid, l_read_alignments, l_loci_bed, d_ref_lengths1, d_r
                    locuspos1, locuspos2,
                    crlid1, crlid2,
                    tpm1, tpm2,
-                   str(first_locus_score), str(second_locus_score), str(combined_score)]
+                   str(first_locus_score), str(second_locus_score), str(combined_score),
+                   mirna_position]
         chimera_found = True
         l_best_chimeras.append(chimera)
 
@@ -316,11 +340,11 @@ def extract_and_write(readid, l_read_alignments, l_loci_bed, d_ref_lengths1, d_r
 
 
 def write_chimeras(chunk_start, chunk_end, total_read_count, d_ref_lengths1, d_ref_lengths2, hybridize,
-                   chimeric_overlap, f_gtf, outdir, crl_file, tpm_threshold, score_cutoff, n):
+                   chimeric_overlap, f_gtf, outdir, crl_file, tpm_threshold, score_cutoff, n, sample_name):
     d_regions = defaultdict()
     l_loci_bed = set()
-    file_chimeras = os.path.join(outdir, "chimeras." + n)
-    file_singletons = os.path.join(outdir, "singletons." + n)
+    file_chimeras = os.path.join(outdir, sample_name + ".chimeras." + n)
+    file_singletons = os.path.join(outdir, sample_name + ".singletons." + n)
     # make bed entry for extracing locus sequence and hybridizing
     with open(file_chimeras, "w") as fh_chimeras, open(file_singletons, "w") as fh_singletons, open(crl_file) as fh_crl:
         prev_readid = None
@@ -361,7 +385,7 @@ def write_chimeras(chunk_start, chunk_end, total_read_count, d_ref_lengths1, d_r
                 fh_bed.write(bed_line + "\n")
 
 
-def hybridize_and_write(outdir, intarna_params, n):
+def hybridize_and_write(outdir, intarna_params, n, sample_name):
     d_loci_seqs = defaultdict()
     fa_seq = SeqIO.parse(open(os.path.join(outdir, "loci.fa.") + n), 'fasta')
     for record in fa_seq:
@@ -369,8 +393,8 @@ def hybridize_and_write(outdir, intarna_params, n):
         d_loci_seqs[record.id[:-3]] = str(record.seq).upper().replace('T', 'U')
 
     d_hybrids = defaultdict()
-    file_chimeras = os.path.join(outdir, "chimeras." + n)
-    with open(file_chimeras) as fh_chimeras, open(os.path.join(outdir, "chimeras-r." + n), "w") as fh_out:
+    file_chimeras = os.path.join(outdir, sample_name + ".chimeras." + n)
+    with open(file_chimeras) as fh_chimeras, open(os.path.join(outdir, sample_name + ".chimeras-r." + n), "w") as fh_out:
         for line in fh_chimeras:
             seq1 = seq2 = dotbracket = pos = energy = "NA"
             a = line.rstrip("\n").split("\t")
@@ -537,9 +561,9 @@ def hybridization_positions(dotbracket1, dotbracket2):
     return end1, end2
 
 
-def write_interaction_summary(outdir):
+def write_interaction_summary(outdir, sample_name):
     d_interactions = defaultdict(lambda: defaultdict(list))
-    with open(os.path.join(outdir, "chimeras")) as fh_in:
+    with open(os.path.join(outdir, sample_name + ".chimeras.txt")) as fh_in:
         next(fh_in)
         for line in fh_in:
             f = line.rstrip("\n").split("\t")
@@ -611,8 +635,25 @@ def write_interaction_summary(outdir):
                                     ";".join(sorted(set(d_interactions[interaction]["ref1"]))),
                                     ";".join(sorted(set(d_interactions[interaction]["ref2"])))]) + "\n")
 
-    os.system("sort -k 1nr,1 " + os.path.join(outdir, "interactions.temp") + " > " + os.path.join(outdir, "interactions"))
+    header_interactions = "\t".join([
+        "read_count",
+        "locus1_chr", "locus1_start", "locus1_end", "locus1_strand",
+        "locus2_chr", "locus2_start", "locus2_end", "locus2_strand",
+        "sequence1", "sequence2", "dotbracket", "mfe", "hybridized_sequences",
+        "hybrid_start_pos", "hybridization_pos", "tpm1", "tpm2", "tpm",
+        "score1", "score2", "score",
+        "region1", "region2", "ref1", "ref2"
+    ])
+    os.system("sort -k 1nr,1 " + os.path.join(outdir, "interactions.temp") + " > " + os.path.join(outdir, "interactions.sorted"))
+    with open(os.path.join(outdir, sample_name + ".interactions.txt"), "w") as fh_out:
+        fh_out.write("# Note: To identify which locus is miRNA vs target, check the region1 and region2 fields.\n")
+        fh_out.write("# miRNA annotations include: miRNA, 3p_mature_mir, 5p_mature_mir, mature_mir\n")
+        fh_out.write(header_interactions + "\n")
+        with open(os.path.join(outdir, "interactions.sorted"), "r") as fh_in:
+            for line in fh_in:
+                fh_out.write(line)
     os.remove(os.path.join(outdir, "interactions.temp"))
+    os.remove(os.path.join(outdir, "interactions.sorted"))
 
 
 if __name__ == "__main__":
@@ -687,7 +728,10 @@ if __name__ == "__main__":
     parser.add_argument("-s", '--summerize', action='store_true', dest='summerize',
                         help="Summerize interactions at loci level")
 
-    parser.add_argument('-v', '--version', action='version', version='%(prog)s 1.4.3')
+    parser.add_argument('-n', '--sample_name', action='store', dest='sample_name', required=True,
+                        metavar='', help='Sample name prefix for output files')
+
+    parser.add_argument('-v', '--version', action='version', version='%(prog)s 1.4.4')
 
     args = parser.parse_args()
 
@@ -707,6 +751,7 @@ if __name__ == "__main__":
     if args.f_ref:
         print('Reference genomic fasta file         : ' + args.f_ref)
     print('Summerize interactions at loci level : ' + str(args.summerize))
+    print('Sample name                            : ' + args.sample_name)
     print("===================================================================")
 
     if args.hybridize and args.f_gtf and not args.f_ref:
@@ -743,7 +788,7 @@ if __name__ == "__main__":
         print(k, s, e, no_of_reads)
         j = Process(target=write_chimeras, args=(s, e, no_of_reads, d_reflen1, d_reflen2, args.hybridize,
                                                  args.chimeric_overlap, args.f_gtf, args.outdir,
-                                                 args.crl_file, tpm_cutoff_value, args.score_cutoff, str(k)))
+                                                 args.crl_file, tpm_cutoff_value, args.score_cutoff, str(k), args.sample_name))
         jobs.append(j)
 
     for j in jobs:
@@ -752,12 +797,13 @@ if __name__ == "__main__":
         j.join()
 
     # file name prefixes
-    chimeras_prefix = chimeras_file = os.path.join(args.outdir, "chimeras")
-    singletons_prefix = os.path.join(args.outdir, "singletons")
+    chimeras_file = os.path.join(args.outdir, args.sample_name + ".chimeras.txt")
+    chimeras_prefix = os.path.join(args.outdir, args.sample_name + ".chimeras")
+    singletons_prefix = os.path.join(args.outdir, args.sample_name + ".singletons")
 
     # if hybridization required
     if args.hybridize:
-        chimeras_prefix = os.path.join(args.outdir, "chimeras-r")
+        chimeras_prefix = os.path.join(args.outdir, args.sample_name + ".chimeras-r")
         f_reference = "NA"
         if args.f_ref:
             f_reference = args.f_ref
@@ -778,7 +824,8 @@ if __name__ == "__main__":
             bed = os.path.join(args.outdir, "loci.bed.") + str(k)
             fa = os.path.join(args.outdir, "loci.fa.") + str(k)
             # loci.bed should exist already, now extract loci sequences
-            process = subprocess.Popen(['fastaFromBed', '-s', '-nameOnly',
+            getfasta_cmd = chira_utilities.get_bedtools_command('getfasta')
+            process = subprocess.Popen(getfasta_cmd + ['-s', '-nameOnly',
                                         '-fi', f_reference,
                                         '-bed', bed,
                                         '-fo', fa],
@@ -798,7 +845,7 @@ if __name__ == "__main__":
         jobs = []
         # hybridize chimeric reads
         for k in range(args.processes):
-            j = Process(target=hybridize_and_write, args=(args.outdir, common_intarna_params, str(k)))
+            j = Process(target=hybridize_and_write, args=(args.outdir, common_intarna_params, str(k), args.sample_name))
             jobs.append(j)
 
         for j in jobs:
@@ -851,7 +898,8 @@ if __name__ == "__main__":
                                  "sequences",
                                  "hybrid",
                                  "hybrid_pos",
-                                 "mfe"])
+                                 "mfe",
+                                 "mirna_position"])
     merge_files(chimeras_prefix, chimeras_file, header_chimeras, args.processes)
     header_singletons = "\t".join(["tagid",
                                    "txid",
@@ -868,8 +916,9 @@ if __name__ == "__main__":
                                    "groupid",
                                    "tpm",
                                    "score"])
-    merge_files(singletons_prefix, singletons_prefix, header_singletons, args.processes)
+    singletons_file = os.path.join(args.outdir, args.sample_name + ".singletons.txt")
+    merge_files(singletons_prefix, singletons_file, header_singletons, args.processes)
     print(str(datetime.datetime.now()), " END: multiprocessing")
     if args.summerize:
-        write_interaction_summary(args.outdir)
+        write_interaction_summary(args.outdir, args.sample_name)
 

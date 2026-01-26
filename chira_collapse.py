@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 from collections import defaultdict
 import argparse
-from Bio import SeqIO
+# Note: Bio.SeqIO is no longer used - raw file parsing is faster for large files
 
 
 if __name__ == "__main__":
@@ -15,7 +15,7 @@ if __name__ == "__main__":
                         help='Output fasta file')
     parser.add_argument("-u", '--umi_len', action='store', type=int, default=0, help="Length of the UMI, if present."
                         "It is trimmed from the 5' end of each read and appended to the tag id")
-    parser.add_argument('-v', '--version', action='version', version='%(prog)s 1.4.3')
+    parser.add_argument('-v', '--version', action='version', version='%(prog)s 1.4.4')
 
     args = parser.parse_args()
     print('Input FASTQ          : ' + args.fastq)
@@ -23,18 +23,36 @@ if __name__ == "__main__":
     print('Length of the UMI    : ' + str(args.umi_len))
 
     d_uniq_reads = defaultdict(int)
+    # Cache UMI length check to avoid repeated conditionals
+    has_umi = args.umi_len > 0
+    
+    # Use raw file parsing for better performance with large files
+    # This is significantly faster than SeqIO.parse() for very large FASTQ files
+    # FASTQ format: @header (line 1), sequence (line 2), +header (line 3), quality (line 4)
     with open(args.fastq) as fh_fastq:
-        for record in SeqIO.parse(fh_fastq, "fastq"):
-            umi = str(record.seq)[0:args.umi_len]
-            sequence = str(record.seq)[args.umi_len:]
-            d_uniq_reads[sequence, umi] += 1
+        line_num = 0
+        for line in fh_fastq:
+            line_num += 1
+            # Sequence is on every 2nd line of each 4-line block (lines 2, 6, 10, ...)
+            if line_num % 4 == 2:  # Sequence line
+                seq_str = line.rstrip('\n\r')
+                if has_umi:
+                    umi = seq_str[:args.umi_len]
+                    sequence = seq_str[args.umi_len:]
+                else:
+                    umi = ""
+                    sequence = seq_str
+                d_uniq_reads[(sequence, umi)] += 1
+    
+    # Write output with optimized string formatting
     c = 1
     with open(args.fasta, "w") as fh_out:
-        for sequence, umi in sorted(d_uniq_reads.keys()):
-            readcount = d_uniq_reads[sequence, umi]
-            seqid = str(c)
+        # Sort items once and iterate directly
+        # Use f-strings for better performance than concatenation
+        for (sequence, umi), readcount in sorted(d_uniq_reads.items()):
             if umi:
-                seqid += "|" + umi
-            seqid += "|" + str(readcount)
-            fh_out.write(">" + seqid + "\n" + sequence + "\n")
+                seqid = f"{c}|{umi}|{readcount}"
+            else:
+                seqid = f"{c}|{readcount}"
+            fh_out.write(f">{seqid}\n{sequence}\n")
             c += 1

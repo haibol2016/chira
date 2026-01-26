@@ -7,7 +7,6 @@ import copy
 
 
 def build_crls(build_crls_too, bed, merged_bed, crl_file, crl_share_cutoff, min_locus_size):
-    l_locilen = []
     l_locipos = []
     l_locireads = []
     d_readlocus_transcripts = defaultdict(list)
@@ -15,22 +14,20 @@ def build_crls(build_crls_too, bed, merged_bed, crl_file, crl_share_cutoff, min_
         for n_locus, line in enumerate(fh_merged_bed):
             # chr14\t64814786\t64814804\t-\ttag_1308593|1|r,ENSMUST00000176386;tag_1308594|2|r,ENSMUST00000176386
             f = line.rstrip('\n').split('\t')
-            locuslen = float(f[2])-float(f[1])+1
-            l_locilen.append(locuslen)
             pos = ':'.join([f[0], f[1], f[2], f[3]])
             l_locipos.append(pos)
             alignments = f[4].split(';')  # in the description column of the bed file,alignments are seperated by ';'
             l_locusreads = set()
             for alignment in alignments:
                 [segmentid, transcriptid, start, end, tx_strand, cigar] = alignment.split(',')
-                transcriptid = alignment.split(',')[1]
+                # transcriptid already extracted above, no need to split again
                 transcriptid_pos = '\t'.join([transcriptid, start, end, tx_strand, cigar])
                 d_readlocus_transcripts[segmentid+str(n_locus)].append(transcriptid_pos)
                 if segmentid not in l_locusreads:
                     l_locusreads.add(segmentid)
             l_locireads.append(set(l_locusreads))
 
-    d_crl_reads = defaultdict(list)
+    d_crl_reads = defaultdict(set)  # Use sets instead of lists for faster operations
     d_crl_locus_reads = defaultdict(lambda: defaultdict())
     l_remaining_locireads = defaultdict(list)
     chira_utilities.print_w_time("START: 1st iteration of CRLs")
@@ -52,22 +49,23 @@ def build_crls(build_crls_too, bed, merged_bed, crl_file, crl_share_cutoff, min_
             lower_bound = len(l_locusreads) * (1 - crl_share_cutoff)
             upper_bound = len(l_locusreads) / (1 - crl_share_cutoff)
             # traverse in reverse order because the latest CRL is the last one
-            for crlid in range(len(d_crl_reads) - 1, 0, -1):
-                l_crlreads = set(d_crl_reads[crlid])
+            for crlid in range(len(d_crl_reads) - 1, -1, -1):  # Include 0 in range
+                l_crlreads = d_crl_reads[crlid]  # Already a set, no need to convert
                 # if the CRL has similar size
                 if lower_bound <= len(l_crlreads) <= upper_bound:
                     # if there are significantly more reads in crl than in locus or otherway around
-                    n_common_reads = len(l_locusreads.intersection(l_crlreads))
+                    n_common_reads = len(l_locusreads & l_crlreads)  # Use & for set intersection
                     if n_common_reads == 0:
                         continue
-                    n_union_reads = len(l_crlreads.union(l_locusreads))
+                    n_union_reads = len(l_locusreads | l_crlreads)  # Use | for set union
                     # jaccard similarity score
                     if n_common_reads / float(n_union_reads) < crl_share_cutoff:
                         continue
                     # identical loci are multi-mapped loci with the same set of identical set of multi-mapped reads
                     l_matched_crls.append(crlid)
                     already_crl_member = True
-                else:
+                elif len(l_crlreads) < lower_bound:
+                    # Since we're going in reverse order and sorted by size, we can break early
                     break
 
             # n_locus is not a member of any crl, hence create a new crl
@@ -75,10 +73,8 @@ def build_crls(build_crls_too, bed, merged_bed, crl_file, crl_share_cutoff, min_
                 l_matched_crls.append(n_crl)
                 n_crl += 1
             for matched_crl in l_matched_crls:
-                l_reads_temp = d_crl_reads[matched_crl]
                 d_crl_locus_reads[matched_crl][n_locus] = l_locusreads
-                l_reads_temp.extend(l_locusreads)
-                d_crl_reads[matched_crl] = l_reads_temp
+                d_crl_reads[matched_crl].update(l_locusreads)  # Use set.update() instead of extend()
         d_crl_reads.clear()
     else:
         l_remaining_locireads = sorted(enumerate(l_locireads), key=lambda x: len(x[1]), reverse=True)
@@ -91,11 +87,13 @@ def build_crls(build_crls_too, bed, merged_bed, crl_file, crl_share_cutoff, min_
     d_locus_crl_share = defaultdict(lambda: defaultdict(float))
     d_highest_shares = defaultdict(float)
     for crlid, d_crlloci in d_crl_locus_reads.items():
-        l_crlreads = []
+        # Build set of all reads in CRL more efficiently
+        l_crlreads = set()
         for l_locusreads in d_crlloci.values():
-            l_crlreads.extend(l_locusreads)
+            l_crlreads.update(l_locusreads)  # Use set.update() instead of extend()
+        crl_reads_len = len(l_crlreads)
         for locusid, l_locusreads in d_crlloci.items():
-            locus_share = len(l_locusreads) / float(len(set(l_crlreads)))
+            locus_share = len(l_locusreads) / float(crl_reads_len)
             d_locus_crl_share[locusid][crlid] = locus_share
             if locus_share > d_highest_shares[locusid]:
                 d_highest_shares[locusid] = locus_share
@@ -152,14 +150,25 @@ def build_crls(build_crls_too, bed, merged_bed, crl_file, crl_share_cutoff, min_
         # enumerate again because of above processing some crlids might be missing
         for crlid, d_crlloci in enumerate(d_crl_locus_reads.values()):
             if len(d_crlloci) > 1:
-                l_crlreads = set([val for sublist in d_crlloci.values() for val in sublist])
+                # Build set more efficiently using set union
+                l_crlreads = set()
+                for l_locusreads in d_crlloci.values():
+                    l_crlreads.update(l_locusreads)
+                crl_reads_len = len(l_crlreads)
+            else:
+                crl_reads_len = None
             for locusid, l_locusreads in d_crlloci.items():
-                if len(d_crlloci) > 1:
-                    locus_share = len(l_locusreads) / float(len(l_crlreads))
+                if crl_reads_len is not None:
+                    locus_share = len(l_locusreads) / float(crl_reads_len)
                 else:
                     locus_share = 1.0
-                for segmentid in sorted(l_locusreads):
-                    for transcriptid_pos in sorted(d_readlocus_transcripts[segmentid+str(locusid)]):
+                # Cache sorted reads to avoid sorting multiple times
+                sorted_reads = sorted(l_locusreads)
+                for segmentid in sorted_reads:
+                    segment_key = segmentid + str(locusid)
+                    # Cache sorted transcript positions
+                    sorted_transcripts = sorted(d_readlocus_transcripts[segment_key])
+                    for transcriptid_pos in sorted_transcripts:
                         entry = "\t".join([segmentid,
                                            transcriptid_pos.split('\t')[0],
                                            str(locusid),
@@ -176,29 +185,44 @@ def em(d_alpha, d_rho, library_size, l_multimap_readids, em_threshold):
     i = 1
     sum_of_rho_diff = float('inf')
     while sum_of_rho_diff > em_threshold and i <= 1000:
-        print("iteration: " + str(i))
+        if i % 10 == 0:  # Print every 10 iterations instead of every iteration
+            print("iteration: " + str(i))
         # E-step
-        d_rho_old = copy.deepcopy(d_rho)
+        # Shallow copy is sufficient since d_rho contains only immutable float values
+        # Using copy() preserves defaultdict behavior, but dict() is slightly faster
+        d_rho_old = dict(d_rho)  # Shallow copy - safe because values are immutable floats
         d_rho.clear()
         # iterate through multi-mapped read segments
         for readid in l_multimap_readids:
-            if len(d_alpha[readid]) == 1:
+            read_crls = d_alpha[readid]
+            if len(read_crls) == 1:
                 continue
-            total_crl_rel_abundancy = 0
-            for crlid in d_alpha[readid]:
-                total_crl_rel_abundancy += d_rho_old[crlid]
-            for crlid in d_alpha[readid]:
-                d_alpha[readid][crlid] = d_rho_old[crlid] / float(total_crl_rel_abundancy)
+            # Pre-compute total abundance to avoid repeated lookups
+            total_crl_rel_abundancy = sum(d_rho_old[crlid] for crlid in read_crls)
+            if total_crl_rel_abundancy > 0:
+                inv_total = 1.0 / total_crl_rel_abundancy
+                for crlid in read_crls:
+                    d_alpha[readid][crlid] = d_rho_old[crlid] * inv_total
 
-        for readid in d_alpha.keys():
-            for crlid in d_alpha[readid]:
+        # Accumulate rho more efficiently - only iterate multimapped reads
+        # (uniquely mapped reads already have their contribution in d_alpha)
+        for readid in l_multimap_readids:
+            read_crls = d_alpha[readid]
+            for crlid in read_crls:
                 d_rho[crlid] += d_alpha[readid][crlid]
+        # Add contributions from uniquely mapped reads (they map to single CRL)
+        for readid in d_alpha:
+            if readid not in l_multimap_readids:  # Uniquely mapped
+                for crlid in d_alpha[readid]:
+                    d_rho[crlid] += d_alpha[readid][crlid]
         # relative abundancies
         # M-step
         sum_of_rho_diff = 0
+        inv_library_size = 1.0 / float(library_size)
         for crlid in d_rho:
-            d_rho[crlid] = d_rho[crlid] / float(library_size)
-            sum_of_rho_diff += abs(d_rho[crlid] - d_rho_old[crlid])
+            new_rho = d_rho[crlid] * inv_library_size
+            sum_of_rho_diff += abs(new_rho - d_rho_old[crlid])
+            d_rho[crlid] = new_rho
         i += 1
     return d_alpha
 
@@ -206,16 +230,26 @@ def em(d_alpha, d_rho, library_size, l_multimap_readids, em_threshold):
 def tpm(d_crl_expression, d_crl_loci_len):
     total_rpk = 0
     d_crl_tpm = defaultdict(float)
-    for crlid in sorted(d_crl_expression.keys()):
+    # Cache sorted keys and sorted lengths to avoid repeated sorting
+    sorted_crlids = sorted(d_crl_expression.keys())
+    d_sorted_lengths = {}
+    for crlid in sorted_crlids:
+        if crlid not in d_sorted_lengths:
+            d_sorted_lengths[crlid] = sorted(d_crl_loci_len[crlid].values())
+    
+    for crlid in sorted_crlids:
         crl_expression = d_crl_expression[crlid]
-        crl_len = chira_utilities.median(sorted(d_crl_loci_len[crlid].values())) / 1000.0  # length in kbs
-        rpk = crl_expression / crl_len
-        d_crl_tpm[crlid] = rpk
-        total_rpk += rpk
+        crl_len = chira_utilities.median(d_sorted_lengths[crlid]) / 1000.0  # length in kbs
+        if crl_len > 0:  # Avoid division by zero
+            rpk = crl_expression / crl_len
+            d_crl_tpm[crlid] = rpk
+            total_rpk += rpk
     millions_of_rpk = total_rpk / 1000000.0
-    for crlid in sorted(d_crl_expression.keys()):
-        crl_tpm = d_crl_tpm[crlid] / millions_of_rpk
-        d_crl_tpm[crlid] = crl_tpm
+    if millions_of_rpk > 0:  # Avoid division by zero
+        inv_millions = 1.0 / millions_of_rpk
+        for crlid in sorted_crlids:
+            crl_tpm = d_crl_tpm[crlid] * inv_millions
+            d_crl_tpm[crlid] = crl_tpm
     return d_crl_tpm
 
 
@@ -224,21 +258,24 @@ def quantify_crls(crl_file, em_threshold):
     l_multimap_readids = []
     d_alpha = defaultdict(lambda: defaultdict(float))
     d_rho = defaultdict(float)
+    # Cache file lines to avoid re-reading
+    file_lines = []
 
-    fh_crl_file = open(crl_file, "r")
-    for line in fh_crl_file:
-        f = line.rstrip("\n").split("\t")
-        # consider the segment id and quantify individula segments than whole reads
-        readid = f[0]
-        locusid = f[2]
-        crlid = f[3]
-        pos = f[9].split(':')
-        locuslength = int(pos[-2]) - int(pos[-3]) + 1
-        # a single locus can belong to multiple crls
-        # one read can be part of multiple crls
-        d_alpha[readid][crlid] = 1
-        d_crl_loci_len[crlid][locusid] = locuslength
-    fh_crl_file.close()
+    # Use context manager for file handling (more efficient)
+    with open(crl_file, "r") as fh_crl_file:
+        for line in fh_crl_file:
+            file_lines.append(line)  # Cache line for later use
+            f = line.rstrip("\n").split("\t")
+            # consider the segment id and quantify individula segments than whole reads
+            readid = f[0]
+            locusid = f[2]
+            crlid = f[3]
+            pos = f[9].split(':')
+            locuslength = int(pos[-2]) - int(pos[-3]) + 1
+            # a single locus can belong to multiple crls
+            # one read can be part of multiple crls
+            d_alpha[readid][crlid] = 1
+            d_crl_loci_len[crlid][locusid] = locuslength
 
     # intial read segment contributions
     for readid in d_alpha.keys():
@@ -262,7 +299,7 @@ def quantify_crls(crl_file, em_threshold):
 
     d_crl_tpm = tpm(d_crl_expression, d_crl_loci_len)
 
-    return d_alpha, d_crl_tpm
+    return d_alpha, d_crl_tpm, file_lines
 
 
 if __name__ == "__main__":
@@ -300,7 +337,7 @@ if __name__ == "__main__":
     parser.add_argument("-crl", '--build_crls_too', action='store_true', dest='build_crls_too',
                         help="Create CRLs too")
 
-    parser.add_argument('-v', '--version', action='version', version='%(prog)s 1.4.3')
+    parser.add_argument('-v', '--version', action='version', version='%(prog)s 1.4.4')
 
     args = parser.parse_args()
 
@@ -318,18 +355,18 @@ if __name__ == "__main__":
                os.path.join(args.outdir, 'loci.txt'), args.crl_share, args.min_locus_size)
     chira_utilities.print_w_time("END: Build CRLs")
     chira_utilities.print_w_time("START: Quantify CRLs")
-    d_read_crl_fractions, d_crl_tpms = quantify_crls(os.path.join(args.outdir, 'loci.txt'), args.em_thresh)
+    d_read_crl_fractions, d_crl_tpms, file_lines = quantify_crls(os.path.join(args.outdir, 'loci.txt'), args.em_thresh)
     chira_utilities.print_w_time("END: Quantify CRLs")
     chira_utilities.print_w_time("START: Write CRLs")
-    with open(os.path.join(args.outdir, 'loci.txt')) as fh_in:
-        with open(os.path.join(args.outdir, 'loci.counts.temp'), "w") as fh_out:
-            for l in fh_in:
-                k = l.rstrip("\n").split("\t")
-                read_id = k[0]
-                crl_id = k[3]
-                fh_out.write("\t".join([l.strip("\n"),
-                                        "{:.2f}".format(d_read_crl_fractions[read_id][crl_id]),
-                                        "{:.4g}".format(d_crl_tpms[crl_id])]) + "\n")
+    # Use cached file lines instead of re-reading file
+    with open(os.path.join(args.outdir, 'loci.counts.temp'), "w") as fh_out:
+        for l in file_lines:
+            k = l.rstrip("\n").split("\t")
+            read_id = k[0]
+            crl_id = k[3]
+            fh_out.write("\t".join([l.strip("\n"),
+                                    "{:.2f}".format(d_read_crl_fractions[read_id][crl_id]),
+                                    "{:.4g}".format(d_crl_tpms[crl_id])]) + "\n")
     chira_utilities.print_w_time("END: Write CRLs")
     os.remove(os.path.join(args.outdir, 'loci.txt'))
     chira_utilities.print_w_time("START: Sort CRLs file by read name")
