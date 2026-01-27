@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 from collections import defaultdict
 import argparse
+import gzip
+
 # Note: Bio.SeqIO is no longer used - raw file parsing is faster for large files
 
 
@@ -10,7 +12,7 @@ if __name__ == "__main__":
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
     parser.add_argument('-i', '--fastq', action='store', dest='fastq', required=True, metavar='',
-                        help='Input fastq file')
+                        help='Input fastq file, gzipped or not')
     parser.add_argument('-o', '--fasta', action='store', dest='fasta', required=True, metavar='',
                         help='Output fasta file')
     parser.add_argument("-u", '--umi_len', action='store', type=int, default=0, help="Length of the UMI, if present."
@@ -29,7 +31,7 @@ if __name__ == "__main__":
     # Use raw file parsing for better performance with large files
     # This is significantly faster than SeqIO.parse() for very large FASTQ files
     # FASTQ format: @header (line 1), sequence (line 2), +header (line 3), quality (line 4)
-    with open(args.fastq) as fh_fastq:
+    with gzip.open(args.fastq, 'rt') if args.fastq.endswith('.gz') else open(args.fastq) as fh_fastq:
         line_num = 0
         for line in fh_fastq:
             line_num += 1
