@@ -4,6 +4,8 @@ Remove microRNA FASTA records from a transcriptome FASTA file.
 
 This script extracts transcript IDs for microRNA entries from an Ensembl GTF file
 and removes corresponding sequences from a transcriptome FASTA file.
+
+make sure to remove version number from fasta header
 """
 
 import argparse
@@ -26,6 +28,14 @@ def extract_mirna_transcript_ids(gtf_file, mirna_pattern=None):
     """
     mirna_transcript_ids = set()
     
+    if mirna_pattern:
+        mirna_pattern = re.compile(mirna_pattern)
+    else:
+        mirna_pattern = re.compile(r'gene_name\s+".*mir-.*"|transcript_name\s+".*mir-.*"|gene_biotype\s+"miRNA"|transcript_biotype\s+"miRNA"')
+    
+    version_pattern = re.compile(r'\.\d+$')
+    transcript_id_pattern = re.compile(r'transcript_id\s+"([^"]+)"')
+
     try:
         with open(gtf_file, 'r') as fh:
             for line in fh:
@@ -41,35 +51,25 @@ def extract_mirna_transcript_ids(gtf_file, mirna_pattern=None):
                 if len(fields) < 9:
                     continue
                 
-                feature_type = fields[2]
+                source = fields[1]
                 attributes = fields[8]
                 
                 # Check if this line is miRNA-related
                 is_mirna = False
                 
                 # Check feature type
-                if feature_type in ['miRNA', 'miRNA_primary_transcript']:
+                if (source == 'miRBase' or mirna_pattern.search(attributes)):
                     is_mirna = True
-                
-                # Check for gene_biotype "miRNA"
-                elif re.search(r'gene_biotype\s+"miRNA"', attributes):
-                    is_mirna = True
-                
-                # Check for transcript_biotype "miRNA"
-                elif re.search(r'transcript_biotype\s+"miRNA"', attributes):
-                    is_mirna = True
-                
-                # Check using user-provided pattern if available
-                elif mirna_pattern:
-                    if mirna_pattern.search(attributes):
-                        is_mirna = True
-                
+                                
                 # If miRNA-related, extract transcript_id
                 if is_mirna:
                     # Extract transcript_id from attributes
-                    transcript_id_match = re.search(r'transcript_id\s+"([^"]+)"', attributes)
+                    transcript_id_match = transcript_id_pattern.search(attributes)
                     if transcript_id_match:
                         transcript_id = transcript_id_match.group(1)
+                        # remove version number if it exists
+                        if version_pattern.search(transcript_id):
+                            transcript_id = version_pattern.sub('', transcript_id)
                         mirna_transcript_ids.add(transcript_id)
         
         return mirna_transcript_ids
@@ -94,42 +94,34 @@ def remove_mirna_from_fasta(fasta_file, output_file, mirna_transcript_ids, keep_
     """
     removed_count = 0
     kept_count = 0
+
+    # always remove version number from fasta header
+    version_pattern = re.compile(r'\.\d+$')
+    transcript_id_split_pattern = re.compile(r'[\s+|]')
     
     try:
         with open(fasta_file, 'r') as fh_in, open(output_file, 'w') as fh_out:
             for record in SeqIO.parse(fh_in, 'fasta'):
                 # Extract transcript ID from FASTA header
                 # FASTA headers can have various formats:
-                # - ENST00000123456 (just transcript ID)
-                # - ENST00000123456|other_info (transcript ID with pipe separator)
+                # - >ENST00000123456 (just transcript ID)
+                # - >ENST00000123456.2 (transcript ID with version number): Ensembl format
+                # - >ENST00000123456|other_info (transcript ID with pipe separator): Gencode format
                 # - >transcript_id description (transcript ID as first word)
-                # - >gene_id|transcript_id|other (pipe-separated)
+
+                record.id = transcript_id_split_pattern.split(record.id.strip())[0]
+                if version_pattern.search(record.id):
+                    record.id = version_pattern.sub('', record.id)
                 
-                header = record.id
                 transcript_id = None
                 
                 # Try to extract transcript ID from header
                 # Method 1: Check if header itself is in the set
-                if header in mirna_transcript_ids:
-                    transcript_id = header
-                
-                # Method 2: Check if header starts with a transcript ID (space or pipe separator)
-                if not transcript_id:
-                    # Try pipe-separated format: transcript_id|other
-                    if '|' in header:
-                        parts = header.split('|')
-                        for part in parts:
-                            if part in mirna_transcript_ids:
-                                transcript_id = part
-                                break
-                    else:
-                        # Try space-separated format: transcript_id description
-                        first_part = header.split()[0] if ' ' in header else header
-                        if first_part in mirna_transcript_ids:
-                            transcript_id = first_part
-                
+                if record.id in mirna_transcript_ids:
+                    transcript_id = record.id
+                              
                 # Check if this record should be removed
-                if transcript_id and transcript_id in mirna_transcript_ids:
+                if transcript_id:
                     removed_count += 1
                 else:
                     # Keep the record

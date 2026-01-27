@@ -11,6 +11,7 @@ The output is a combined GTF file suitable for use as ref2.fasta annotation in s
 
 import argparse
 import sys
+import re
 
 
 def concatenate_gtf_files(mirna_gtf, target_gtf, output_gtf, keep_target_comments=True):
@@ -26,6 +27,8 @@ def concatenate_gtf_files(mirna_gtf, target_gtf, output_gtf, keep_target_comment
     mirna_count = 0
     target_count = 0
     
+    version_pattern = re.compile(r'transcript_id\s+"([^".]+)\.\d+"')
+    
     try:
         with open(output_gtf, 'w') as fh_out:
             # First, write target transcriptome GTF (with optional comments)
@@ -36,6 +39,8 @@ def concatenate_gtf_files(mirna_gtf, target_gtf, output_gtf, keep_target_comment
                         if keep_target_comments:
                             fh_out.write(line)
                     else:
+                        # remove version number from transcript_id
+                        line = version_pattern.sub(r'transcript_id "\1"', line)
                         fh_out.write(line)
                         target_count += 1
             
@@ -46,6 +51,8 @@ def concatenate_gtf_files(mirna_gtf, target_gtf, output_gtf, keep_target_comment
                     # Skip comment lines from miRNA GTF
                     if line.startswith('#'):
                         continue
+                    # remove version number from transcript_id
+                    line = version_pattern.sub(r'transcript_id "\1"', line)
                     fh_out.write(line)
                     mirna_count += 1
         

@@ -4,6 +4,8 @@ Remove all included microRNA entries from an Ensembl GTF file.
 
 This script filters out all lines in a GTF file that are related to microRNAs,
 including miRNA genes, miRNA transcripts, and miRNA features.
+
+make sure to remove version number from transcript_id
 """
 
 import argparse
@@ -33,27 +35,9 @@ def is_mirna_line(line, mirna_pattern=None):
         return False
     
     # Check feature type
-    feature_type = fields[2]
-    if feature_type in ['miRNA', 'miRNA_primary_transcript']:
-        return True
-    
-    # Check attributes for miRNA biotype
+    source = fields[1]
     attributes = fields[8]
-    
-    # Check for gene_biotype "miRNA"
-    if re.search(r'gene_biotype\s+"miRNA"', attributes):
-        return True
-    
-    # Check for transcript_biotype "miRNA" (if present)
-    if re.search(r'transcript_biotype\s+"miRNA"', attributes):
-        return True
-    
-    # Check for miRNA using user-provided pattern if available
-    if mirna_pattern:
-        if mirna_pattern.search(attributes):
-            return True
-    
-    return False
+    return (source == 'miRBase' or mirna_pattern.search(attributes))
 
 
 def remove_mirna_from_gtf(input_gtf, output_gtf, keep_comments=True, mirna_pattern=None):
@@ -127,7 +111,9 @@ if __name__ == "__main__":
         except re.error as e:
             print(f"Error: Invalid regular expression pattern: {e}", file=sys.stderr)
             sys.exit(1)
-    
+    else:
+        mirna_pattern = re.compile(r'gene_name\s+".*mir-.*"|transcript_name\s+".*mir-.*"|gene_biotype\s+"miRNA"|transcript_biotype\s+"miRNA"')
+
     remove_mirna_from_gtf(
         args.input_gtf,
         args.output_gtf,
