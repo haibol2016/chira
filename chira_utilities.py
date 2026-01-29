@@ -26,11 +26,13 @@ def overlap(f, s):
 
 
 def median(x):
-    n = len(x)
-    mid = int(n/2)
+    # Sort the list first (median requires sorted data)
+    x_sorted = sorted(x)
+    n = len(x_sorted)
+    mid = n // 2  # Use integer division (more Pythonic)
     if not n % 2:
-        return (x[mid-1] + x[mid]) / 2.0
-    return x[mid]
+        return (x_sorted[mid-1] + x_sorted[mid]) / 2.0
+    return x_sorted[mid]
 
 
 def query_length(cigar, is_reverse):
@@ -150,8 +152,13 @@ def get_bedtools_command(tool_name):
     
     # Try new format first (bedtools <tool>)
     try:
-        subprocess.run(new_cmd + ['--help'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=2, check=False)
-        result = new_cmd
+        process = subprocess.run(new_cmd + ['--help'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=2, check=False)
+        # Check if command actually succeeded (returncode 0)
+        if process.returncode == 0:
+            result = new_cmd
+        else:
+            # Command exists but failed, fall back to old format
+            result = [old_cmd]
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         # Fall back to old format (individual command)
         result = [old_cmd]

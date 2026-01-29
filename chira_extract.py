@@ -82,7 +82,7 @@ def guess_region(transcriptid, read_pos):
                 end = int(pos[2])
                 strand = strandardize(pos[3])
                 name = pos[4]
-                if read_chr != chrom and read_strand != strand:
+                if read_chr != chrom or read_strand != strand:
                     continue
                 if chira_utilities.overlap([start, end], [int(read_start), int(read_end)]) > overlap_length:
                     overlap_length = chira_utilities.overlap([start, end], [int(read_start), int(read_end)])
@@ -246,15 +246,15 @@ def extract_and_write(readid, l_read_alignments, l_loci_bed, d_ref_lengths1, d_r
 
         if tx_len1 == "NA" or tx_len2 == "NA":
             if len(d_ref_lengths2) == 0:
-                tx_len1 = d_reflen1[transcriptid1]
-                tx_len2 = d_reflen1[transcriptid2]
+                tx_len1 = d_ref_lengths1[transcriptid1]
+                tx_len2 = d_ref_lengths1[transcriptid2]
             else:
                 try:
-                    tx_len1 = d_reflen1[transcriptid1]
-                    tx_len2 = d_reflen2[transcriptid2]
+                    tx_len1 = d_ref_lengths1[transcriptid1]
+                    tx_len2 = d_ref_lengths2[transcriptid2]
                 except KeyError:
-                    tx_len1 = d_reflen2[transcriptid1]
-                    tx_len2 = d_reflen1[transcriptid2]
+                    tx_len1 = d_ref_lengths2[transcriptid1]
+                    tx_len2 = d_ref_lengths1[transcriptid2]
 
         # Determine if miRNA is first or last in the read
         # Check if region1 or region2 is miRNA
@@ -390,7 +390,13 @@ def hybridize_and_write(outdir, intarna_params, n, sample_name):
     fa_seq = SeqIO.parse(open(os.path.join(outdir, "loci.fa.") + n), 'fasta')
     for record in fa_seq:
         # ids of the form ENSMUST00000185852:1602:1618:+(+). Strip last 3 characters
-        d_loci_seqs[record.id[:-3]] = str(record.seq).upper().replace('T', 'U')
+        # Safely handle IDs that might be shorter than 3 characters
+        if len(record.id) >= 3:
+            locus_id = record.id[:-3]
+        else:
+            # If ID is shorter than 3 chars, use as-is (shouldn't happen normally)
+            locus_id = record.id
+        d_loci_seqs[locus_id] = str(record.seq).upper().replace('T', 'U')
 
     d_hybrids = defaultdict()
     file_chimeras = os.path.join(outdir, sample_name + ".chimeras." + n)
@@ -529,7 +535,22 @@ def parse_counts_file(crl_file, tpm_cutoff):
             prev_readid = readid
 
     uniq_tpms = sorted(list(set(d_crl_tpm.values())))
-    tpm_threshold = uniq_tpms[int(tpm_cutoff * len(uniq_tpms))]
+    
+    # Clamp tpm_cutoff to [0, 1) to prevent index out of bounds
+    if tpm_cutoff < 0:
+        tpm_cutoff = 0.0
+    elif tpm_cutoff >= 1.0:
+        tpm_cutoff = 0.999999  # Just below 1.0 to ensure valid index
+    
+    # Handle empty list case
+    if len(uniq_tpms) == 0:
+        tpm_threshold = 0.0
+    else:
+        # Calculate index: ensure it's in valid range [0, len-1]
+        index = int(tpm_cutoff * len(uniq_tpms))
+        # Clamp index to valid range (shouldn't be needed with tpm_cutoff < 1.0, but defensive)
+        index = min(index, len(uniq_tpms) - 1)
+        tpm_threshold = uniq_tpms[index]
 
     return read_count, tpm_threshold
 
@@ -549,11 +570,12 @@ def merge_files(inprefix, outfile, header, r):
 def hybridization_positions(dotbracket1, dotbracket2):
     end1 = -1
     end2 = -1
-    for i, c1 in enumerate(dotbracket1):
+    for i in range(len(dotbracket1)):
         if dotbracket1[i] == '(':
             end1 = i + 1
             dotbracket1[i] = "."
-            for j, c2 in enumerate(reversed(dotbracket2)):
+            # Iterate backward through dotbracket2 to find last ')' in original
+            for j in range(len(dotbracket2) - 1, -1, -1):
                 if dotbracket2[j] == ')':
                     end2 = j + 1
                     dotbracket2[j] = '.'
@@ -677,11 +699,11 @@ if __name__ == "__main__":
     parser.add_argument('-tc', '--tpm_cutoff', action='store', type=chira_utilities.score_float, default=0, metavar='',
                         dest='tpm_cutoff',
                         help='Transcripts with less than this percentile TPMs will be discarded in '
-                             'the final output. [0-1.0]')
+                             'the final output. [0, 1) - values >= 1.0 will be clamped to just below 1.0')
 
     parser.add_argument('-sc', '--score_cutoff', action='store', type=chira_utilities.score_float, default=0.0, metavar='',
                         dest='score_cutoff',
-                        help='Hybrids with less than this score will be discarded in the final output. [0-1.0]')
+                        help='Hybrids with less than this score will be discarded in the final output. [0-1.0)')
 
     parser.add_argument('-co', '--chimeric_overlap', action='store', type=int, default=2, metavar='',
                         dest='chimeric_overlap',

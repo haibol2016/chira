@@ -7,8 +7,8 @@ ChiRA is a set of tools to analyze RNA-RNA interactome experimental data such as
 **Note**: This is a modified version of ChiRA (based on v1.4.3) with significant performance optimizations and new features. The original code is licensed under GPL v3, and this modified version maintains the same license. All changes are documented in the "Recent Improvements" section below and in [CHANGELOG.md](CHANGELOG.md).
 
 ## Version History
-- **v1.4.4** (Current): Performance optimizations, BEDTools compatibility, sample name support, and bug fixes
-- **v1.4.3** (Previous): Original version before modifications
+- **v1.4.4** (Current, 2026-01-26): Performance optimizations, BEDTools compatibility, sample name support, comprehensive bug fixes, and new utility scripts
+- **v1.4.3** (Previous): Original version from GitHub (https://github.com/pavanvidem/chira)
 
 See [CHANGELOG.md](CHANGELOG.md) for detailed change history.
 
@@ -39,9 +39,13 @@ This version includes significant performance optimizations and new features. Fo
 - No code changes needed when switching between BEDTools versions
 
 **Bug Fixes:**
-- Fixed CRL iteration bug that skipped index 0
-- Improved file handling with proper context managers
-- Fixed BEDTools command compatibility across versions
+- **chira_map.py**: Fixed first iteration bug that wrote empty string to unmapped FASTA file
+- **chira_merge.py**: Added zero-length match checks to prevent division by zero errors
+- **chira_extract.py**: Fixed multiple bugs including undefined variables, logic errors in strand/chromosome checks, index out-of-bounds in TPM cutoff, and string slicing issues
+- **chira_utilities.py**: Fixed `median()` function bug where input wasn't sorted; improved `get_bedtools_command()` to verify command success
+- **chira_quantify.py**: Fixed CRL iteration bug that skipped index 0
+- Improved file handling with proper context managers throughout
+- Fixed BEDTools command compatibility across versions with automatic detection
 
 For complete details with line-by-line changes, please refer to [CHANGELOG.md](CHANGELOG.md).
 
@@ -137,11 +141,19 @@ download_mirbase_mature.py -s hsa -o mature_mirna_hsa.fasta
 download_ensembl.py -s homo_sapiens -g 110 -t 110 -o ./ensembl_files
 ```
 
-**1.3 Convert miRBase GFF3 to GTF (if needed):**
+**1.3 Download miRBase GFF3 file:**
 ```bash
-# Convert miRBase GFF3 to ENSEMBL GTF format
-gff3_to_gtf.py -i bta.gff3 -o mature_mirna.gtf -m chr_mapping.txt
+# Download species-specific GFF3 file from miRBase (contains mature miRNA coordinates)
+download_mirbase_gff3.py -s hsa -o hsa.gff3
+
+# With chromosome name mapping (if needed)
+download_mirbase_gff3.py -s hsa -o hsa.gff3 -m chr_mapping.txt
+
+# Download specific version (e.g., version 21)
+download_mirbase_gff3.py -s hsa -o hsa_v21.gff3 --mirbase-version 21
 ```
+
+**Note:** The GFF3 file from miRBase contains mature miRNA coordinates and can be used directly with ChiRA. You don't need to convert it to GTF format. 
 
 **1.4 Prepare target transcriptome (remove miRNAs):**
 ```bash
@@ -155,17 +167,23 @@ remove_mirna_hairpin_from_fasta.py -g target_transcriptome.gtf \
   -o target_transcriptome.fasta
 ```
 
-**1.5 Combine miRNA and target GTF (for annotation):**
+**1.6 Combine miRNA and target GTF (for annotation):**
 ```bash
 # Concatenate miRNA GTF with target GTF
 concatenate_gtf.py -m mature_mirna.gtf -t target_transcriptome.gtf \
   -o combined_annotation.gtf
 ```
 
+**1.7 Combine cDNA and ncRNA FASTA files (optional):**
+```bash
+# Concatenate cDNA and ncRNA FASTA files (removes version numbers from transcript IDs)
+concatenate_fasta.py -c cdna.fasta -n ncrna.fasta -o combined_transcriptome.fasta
+```
+
 **Result:** You now have:
 - `ref1.fasta`: Mature miRNA sequences (from miRBase)
 - `ref2.fasta`: Target transcriptome sequences (without miRNAs)
-- `combined_annotation.gtf`: Combined annotation file
+- `combined_annotation.gtf`: Combined annotation file (if combining miRNA and target annotations)
 
 ---
 
@@ -263,11 +281,15 @@ ENSEMBL_VERSION="110"
 
 # Step 1: Prepare references
 echo "Step 1: Preparing reference files..."
+
+# Download mature miRNA sequences (FASTA)
 download_mirbase_mature.py -s $SPECIES -o ref1.fasta
+
+# Download miRBase GFF3 (contains mature miRNA coordinates, can be used directly)
+download_mirbase_gff3.py -s $SPECIES -o mirbase.gff3
+
 download_ensembl.py -s homo_sapiens -g $ENSEMBL_VERSION -t $ENSEMBL_VERSION -o ./ensembl
 
-# Convert miRBase GFF3 to GTF (if you have it)
-# gff3_to_gtf.py -i mirbase.gff3 -o mature_mirna.gtf -m chr_mapping.txt
 
 # Remove miRNAs from target transcriptome
 remove_mirna_hairpin_from_gtf.py -i ensembl/Homo_sapiens.GRCh38.$ENSEMBL_VERSION.gtf \
@@ -431,15 +453,14 @@ A split reference uses two separate reference FASTA files instead of one combine
 - `-p, --processes`: Number of parallel processes (default: 1)
 
 **Outputs:**
-- `{index_type}.{align_type}.bam`: BAM files for long and short alignments
-- `merged.bam`: Merged BAM file (if split-reference used)
 - `sorted.bam`: Sorted BAM file
-- `mapped.bed`: BED file containing all alignments
-- `unmapped.fa`: FASTA file with unmapped reads (optional)
+- `sorted.bed`: BED file containing all alignments
+- `unmapped.fasta`: FASTA file with unmapped reads (optional)
 
 **Usage Example:**
 ```bash
-chira_map.py -i reads.fasta -o output_dir -f1 ref1.fasta -f2 ref2.fasta -a bwa -s both -p 8
+chira_map.py -i reads.fasta -o output_dir \
+   -f1 ref1.fasta -f2 ref2.fasta -a bwa -s both -p 8
 ```
 
 ---
@@ -475,8 +496,8 @@ chira_map.py -i reads.fasta -o output_dir -f1 ref1.fasta -f2 ref2.fasta -a bwa -
 - Blockbuster parameters: `-d, --distance`, `-mc, --min_cluster_height`, `-mb, --min_block_height`, `-sc, --scale`
 
 **Outputs:**
-- `segments.bed`: BED file with reads categorized into segments
-- `loci.txt`: Tabular file with merged alignments
+- `segments.bed`: A BED file with reads categorized into segments
+- `merged.bed`: A tabular file with merged alignments
   - Column 4: All alignments merged into that location
   - Column 5: Number of reads supporting the locus
 
@@ -498,8 +519,8 @@ chira_merge.py -b mapped.bed -o output_dir -g annotation.gtf -f1 ref1.fasta -ao 
 - Configurable CRL building thresholds
 
 **Required Inputs:**
-- `-b, --bed`: Input BED file containing alignment segments (from `chira_merge.py`)
-- `-m, --merged_bed`: Input merged BED file (loci.txt from `chira_merge.py`)
+- `-b, --bed`: Input BED file containing alignment segments (segments.bed from `chira_merge.py`)
+- `-m, --merged_bed`: Input merged BED file (merged.bed from `chira_merge.py`)
 - `-o, --outdir`: Output directory
 
 **Key Parameters:**
@@ -509,7 +530,7 @@ chira_merge.py -b mapped.bed -o output_dir -g annotation.gtf -f1 ref1.fasta -ao 
 - `-crl, --build_crls_too`: Create CRLs in addition to quantification
 
 **Outputs:**
-- `loci.txt`: Tabular file containing reads, their CRLs, and TPM values
+- `loci.counts`: Tabular file containing reads, their CRLs, and TPM values
   - Each line represents a read-CRL association with TPM quantification
   - Used as input for `chira_extract.py`
 
@@ -532,15 +553,15 @@ chira_quantify.py -b segments.bed -m loci.txt -o output_dir -cs 0.7 -ls 10
 - Customizable output file names with sample name prefix
 
 **Required Inputs:**
-- `-l, --loci`: Tabular file containing CRL information (from `chira_quantify.py`)
+- `-l, --loci`: Tabular file containing CRL information ('loci.counts' from `chira_quantify.py`)
 - `-o, --out`: Output directory path
 - `-f1, --ref_fasta1`: First priority reference FASTA file
 - `-n, --sample_name`: Sample name prefix for output files (required)
 
 **Optional Inputs:**
-- `-g, --gtf`: Annotation GTF/GFF file for locus annotation
+- `-g, --gtf`: Annotation GTF/GFF file for locus annotation including miRBase gff3 for mature miRNA.
 - `-f2, --ref_fasta2`: Second priority reference FASTA file
-- `-f, --ref`: Reference genomic FASTA file (if genomic coordinates used in `chira_merge.py`)
+- `-f, --ref`: Reference genomic FASTA file 
 
 **Key Parameters:**
 - `-r, --hybridize`: Enable RNA-RNA hybridization prediction (IntaRNA)
@@ -662,38 +683,6 @@ chira_extract.py -l loci.txt -o output_dir -f1 ref1.fasta -n sample1 \
 
 The following utility scripts are provided to help prepare reference files and annotations for ChiRA analysis:
 
-### gff3_to_gtf.py
-
-**Description:** Converts GFF3 format files (e.g., from miRBase) to GTF format following ENSEMBL conventions. Supports chromosome name mapping and optional coordinate liftover between genome versions.
-
-**Key Features:**
-- Converts ID/Parent relationships to gene_id/transcript_id
-- Handles hierarchical structure (gene → transcript → exon/CDS/UTR)
-- Supports chromosome name mapping via mapping file
-- Optional coordinate liftover using pyliftover
-
-**Required Inputs:**
-- `-i, --gff3`: Input GFF3 file
-- `-o, --gtf`: Output GTF file
-
-**Optional Parameters:**
-- `-m, --chromosome_mapping`: Two-column TSV file for chromosome name mapping (original_name<tab>new_name)
-- `--source-genome`: Source genome version for liftover (e.g., hg19, GRCh37)
-- `--target-genome`: Target genome version for liftover (e.g., hg38, GRCh38)
-- `--chain-file`: Chain file for coordinate liftover (requires pyliftover: `pip install pyliftover`)
-
-**Usage Example:**
-```bash
-# Basic conversion
-gff3_to_gtf.py -i bta.gff3 -o bta.gtf -m chr_mapping.txt
-
-# With coordinate liftover
-gff3_to_gtf.py -i input.gff3 -o output.gtf \
-  --source-genome GRCh37 --target-genome GRCh38 \
-  --chain-file GRCh37_to_GRCh38.chain.gz
-```
-
----
 
 ### download_ensembl.py
 
@@ -745,6 +734,67 @@ download_ensembl.py -s homo_sapiens -g 110 -t 110 -o ./ensembl_files
 **Usage Example:**
 ```bash
 download_mirbase_mature.py -s hsa -o mature_mirna_hsa.fasta
+```
+
+---
+
+### download_mirbase_gff3.py
+
+**Description:** Downloads species-specific GFF3 files from miRBase containing chromosomal coordinates of microRNAs.
+
+**Key Features:**
+- Downloads current or version-specific GFF3 files
+- Contains both miRNA_primary_transcript (hairpin precursors) and miRNA (mature sequences)
+- Optional chromosome name mapping for coordinate conversion
+- Can be used directly with ChiRA (no GTF conversion needed)
+
+**Required Inputs:**
+- `-s, --species`: Species code (e.g., hsa=human, mmu=mouse, bta=bovine, rno=rat)
+- `-o, --output`: Output GFF3 file path
+
+**Optional Parameters:**
+- `--mirbase-version`: miRBase version number (e.g., "21"). Default: CURRENT version
+- `-m, --chromosome-mapping`: Tab-separated file with two columns: `gff3_chromosome_name<tab>target_chromosome_name`
+  - Chromosome names in the GFF3 file will be converted to target names in the output
+- `--timeout`: Download timeout in seconds (default: 60)
+
+**Usage Example:**
+```bash
+# Download current version
+download_mirbase_gff3.py -s hsa -o hsa.gff3
+
+# Download specific version with chromosome mapping
+download_mirbase_gff3.py -s hsa -o hsa.gff3 --mirbase-version 21 -m chr_mapping.txt
+```
+
+**Note:** The GFF3 file from miRBase contains mature miRNA coordinates and can be used directly with ChiRA. You don't need to convert it to GTF format unless you want to combine it with Ensembl annotations.
+
+---
+
+### concatenate_fasta.py
+
+**Description:** Concatenates cDNA and ncRNA FASTA files into a single output file, removing version numbers from transcript IDs in the headers.
+
+**Key Features:**
+- Combines cDNA and ncRNA FASTA files
+- Removes version numbers from transcript IDs (e.g., `ENST00000123456.1` → `ENST00000123456`)
+- Supports both Ensembl style (space-separated) and GENCODE style (pipe-separated) headers
+- At least one input file (cDNA or ncRNA) must be provided
+
+**Required Inputs:**
+- `-o, --output`: Output concatenated FASTA file
+
+**Optional Parameters:**
+- `-c, --cdna`: Input cDNA FASTA file (optional, but at least one input must be provided)
+- `-n, --ncrna`: Input ncRNA FASTA file (optional, but at least one input must be provided)
+
+**Usage Example:**
+```bash
+# Concatenate both cDNA and ncRNA
+concatenate_fasta.py -c cdna.fasta -n ncrna.fasta -o combined_transcriptome.fasta
+
+# Concatenate only cDNA
+concatenate_fasta.py -c cdna.fasta -o combined.fasta
 ```
 
 ---

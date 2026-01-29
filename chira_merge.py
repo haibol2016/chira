@@ -15,10 +15,6 @@ def filter_alignments(prev_read_alignments, chimeric_overlap, refids1, refids2, 
     if len(refids1) > 0 and len(refids2) > 0:
         split_reference = True
 
-    # Convert to sets for faster membership testing (initialize even if not split)
-    refids1_set = set(refids1) if refids1 else set()
-    refids2_set = set(refids2) if refids2 else set()
-
     alignments1 = defaultdict(list)
     alignments2 = defaultdict(list)
     alignments_pairs = []
@@ -28,22 +24,16 @@ def filter_alignments(prev_read_alignments, chimeric_overlap, refids1, refids2, 
         # split the alignments based on their references
         l_pos1 = []
         l_pos2 = []
-        l_pos1_set = set()  # Use set for faster membership testing
-        l_pos2_set = set()
         for readpos in prev_read_alignments:
             for refpos in prev_read_alignments[readpos]:
-                # Cache the split result
-                refid = refpos.split(',')[0]
-                if refid in refids1_set:
+                if refpos.split(',')[0] in refids1:
                     alignments1[refpos].append(readpos)
-                    if readpos not in l_pos1_set:
+                    if readpos not in l_pos1:
                         l_pos1.append(readpos)
-                        l_pos1_set.add(readpos)
-                elif refid in refids2_set:
+                elif refpos.split(',')[0] in refids2:
                     alignments2[refpos].append(readpos)
-                    if readpos not in l_pos2_set:
+                    if readpos not in l_pos2:
                         l_pos2.append(readpos)
-                        l_pos2_set.add(readpos)
         alignments_pairs = list(itertools.product(l_pos1, l_pos2))
     else:
         alignments_pairs = list(itertools.combinations(prev_read_alignments, 2))
@@ -67,12 +57,9 @@ def filter_alignments(prev_read_alignments, chimeric_overlap, refids1, refids2, 
             else:
                 chimeric_distance = readpos1[0] - readpos2[1]
             for refpos1 in prev_read_alignments[readpos1]:
-                # Cache split result
-                refid1 = refpos1.split(',')[0]
                 for refpos2 in prev_read_alignments[readpos2]:
                     if split_reference:
-                        refid2 = refpos2.split(',')[0]
-                        if refid1 not in refids1_set or refid2 not in refids2_set:
+                        if refpos1.split(',')[0] not in refids1 or refpos2.split(',')[0] not in refids2:
                             continue
                         if readpos1 not in alignments1[refpos1] or readpos2 not in alignments2[refpos2]:
                             continue
@@ -94,11 +81,9 @@ def filter_alignments(prev_read_alignments, chimeric_overlap, refids1, refids2, 
                 prev_ref = None
                 for refpos, bedline in prev_read_alignments[readpos].items():
                     # for each read position and reference consider 1st alignmnet only
-                    # Cache split result
-                    refid = refpos.split(',')[0]
-                    if refid != prev_ref:
+                    if refpos.split(',')[0] != prev_ref:
                         filtered_alignments[readpos][refpos] = bedline
-                    prev_ref = refid
+                    prev_ref = refpos.split(',')[0]
     # chimeric read
     else:
         for readpos1, readpos2 in alignments_pairs:
@@ -113,13 +98,10 @@ def filter_alignments(prev_read_alignments, chimeric_overlap, refids1, refids2, 
             else:
                 chimeric_distance = readpos1[0] - readpos2[1]
             for refpos1 in prev_read_alignments[readpos1]:
-                # Cache split result
-                refid1 = refpos1.split(',')[0]
                 for refpos2 in prev_read_alignments[readpos2]:
                     qualified = False
                     if split_reference:
-                        refid2 = refpos2.split(',')[0]
-                        if refid1 in refids1_set and refid2 in refids2_set:
+                        if refpos1.split(',')[0] in refids1 and refpos2.split(',')[0] in refids2:
                             if readpos1 in alignments1[refpos1] and readpos2 in alignments2[refpos2]:
                                 qualified = True
                     else:
@@ -134,29 +116,29 @@ def filter_alignments(prev_read_alignments, chimeric_overlap, refids1, refids2, 
 
 def write_segments(prev_readid, filtered_alignments, segment_overlap_fraction, fh_out):
     d_read_segments = defaultdict(list)
-    # Cache sorted keys to avoid repeated sorting
-    sorted_alignments = sorted(filtered_alignments)
-    # Cache sorted segment positions
-    d_sorted_segments = {}
-    for (current_match_start, current_match_end, current_strand) in sorted_alignments:
+    for (current_match_start, current_match_end, current_strand) in sorted(filtered_alignments):
         similar_cigar_found = False
         matched_segment = ""
+        
         for segmentid in d_read_segments:
             if (current_match_start, current_match_end, current_strand) in d_read_segments[segmentid]:
                 similar_cigar_found = True
                 matched_segment = segmentid
                 break
-            # Cache sorted positions
-            if segmentid not in d_sorted_segments:
-                d_sorted_segments[segmentid] = sorted(d_read_segments[segmentid])
-            l_read_pos = d_sorted_segments[segmentid]
+            l_read_pos = sorted(d_read_segments[segmentid])
             # check with the first position in this segment
             first_match_start = l_read_pos[0][0]
             first_match_end = l_read_pos[0][1]
             overlap = max(0, min(first_match_end, current_match_end)
                           - max(first_match_start, current_match_start))
-            overlap_percent1 = overlap / float(first_match_end - first_match_start)
-            overlap_percent2 = overlap / float(current_match_end - current_match_start)
+            first_match_length = first_match_end - first_match_start
+            current_match_length = current_match_end - current_match_start
+            if first_match_length == 0 or current_match_length == 0:
+                print(f"Warning: Zero-length match detected...", file=sys.stderr)
+                continue
+
+            overlap_percent1 = overlap / float(first_match_length)
+            overlap_percent2 = overlap / float(current_match_length)
             # reciprocal overlap is needed, continue if one fails
             if overlap_percent1 < segment_overlap_fraction or \
                     overlap_percent2 < segment_overlap_fraction:
@@ -167,8 +149,13 @@ def write_segments(prev_readid, filtered_alignments, segment_overlap_fraction, f
             last_match_end = l_read_pos[-1][1]
             overlap = max(0, min(last_match_end, current_match_end)
                           - max(last_match_start, current_match_start))
-            overlap_percent1 = overlap / float(last_match_end - last_match_start)
-            overlap_percent2 = overlap / float(current_match_end - current_match_start)
+            last_match_length = last_match_end - last_match_start
+            if last_match_length == 0:
+                print(f"Warning: Zero-length match detected...", file=sys.stderr)
+                continue
+            
+            overlap_percent1 = overlap / float(last_match_length)
+            overlap_percent2 = overlap / float(current_match_length)
             if overlap_percent1 >= segment_overlap_fraction and \
                     overlap_percent2 >= segment_overlap_fraction:
                 similar_cigar_found = True
@@ -181,9 +168,6 @@ def write_segments(prev_readid, filtered_alignments, segment_overlap_fraction, f
                 matched_segment = 1
         if (current_match_start, current_match_end, current_strand) not in d_read_segments[matched_segment]:
             d_read_segments[matched_segment].append((current_match_start, current_match_end, current_strand))
-            # Invalidate cached sorted positions for this segment
-            if matched_segment in d_sorted_segments:
-                del d_sorted_segments[matched_segment]
 
         for refid, alignment in filtered_alignments[current_match_start, current_match_end, current_strand].items():
             f = alignment.split('\t')
@@ -198,7 +182,7 @@ def update_cigar(bedline, merged_readpos, merged_refpos):
     [readid, refid, start, end, strand, cigar] = bedline.split('\t')[3].split(',')
     read_len = chira_utilities.query_length(cigar, strand == "-")
     new_cigar = ""
-    # TODO check if the cigar is correct for reverse strandede alignment
+    # TODO check if the cigar is correct for reverse stranded alignment
     if merged_readpos[0] > 0:
         new_cigar += str(merged_readpos[0] - 1) + "S"
     new_cigar += str(merged_readpos[1] - merged_readpos[0] + 1) + "M"
@@ -290,10 +274,9 @@ def reads_to_segments(bed, outdir, segment_overlap_fraction, chimeric_overlap, r
 
 
 def merge_overlapping_intervals(d_desc, chrom, alignment_overlap_fraction):
-    startpos_sorted = sorted(d_desc[chrom], key=lambda tup: tup[0])
     t_merged = []
     d_mergeddesc = defaultdict(list)
-    for currentpos in startpos_sorted:
+    for currentpos in sorted(d_desc[chrom], key=lambda tup: tup[0]):
         if not t_merged:
             t_merged.append(currentpos)
             d_mergeddesc[currentpos[0]].extend(d_desc[chrom][currentpos])
@@ -338,7 +321,6 @@ def merge_loci_overlap(outdir, alignment_overlap_fraction, min_locus_size):
                 # choose per locus per transcript only one longest alignment
                 # First pass: find longest alignment per read/transcript
                 for alignment in d_mergeddesc[pos[0]]:
-                    # Cache split results
                     alignment_parts = alignment.split(',')
                     segmentid = alignment_parts[0]
                     transcriptid = alignment_parts[1]
@@ -542,7 +524,6 @@ def transcript_to_genomic_pos(transcriptomic_bed, genomic_bed, f_geneexonbed, f_
             exonid = f[9]
             pol = f[11]
             if prev_readid and prev_readid != readid:
-                # Use set for deduplication, but cache it
                 unique_junctions = set(l_withjunctions)
                 if len(unique_junctions) == 1:
                     fh_wojunctions.write(unique_junctions.pop())
@@ -550,9 +531,7 @@ def transcript_to_genomic_pos(transcriptomic_bed, genomic_bed, f_geneexonbed, f_
                 else:
                     longest_splice = 0
                     longest_splice_align = ""
-                    # Sort only once
-                    sorted_junctions = sorted(unique_junctions)
-                    for splice_align in sorted_junctions:
+                    for splice_align in sorted(unique_junctions):
                         x = splice_align.split("\t")
                         splice_len = int(x[2]) - int(x[1])
                         if splice_len > longest_splice:

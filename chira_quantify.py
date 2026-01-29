@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 import os
+import sys
 from collections import defaultdict
 import argparse
 import chira_utilities
@@ -19,7 +20,12 @@ def build_crls(build_crls_too, bed, merged_bed, crl_file, crl_share_cutoff, min_
             alignments = f[4].split(';')  # in the description column of the bed file,alignments are seperated by ';'
             l_locusreads = set()
             for alignment in alignments:
-                [segmentid, transcriptid, start, end, tx_strand, cigar] = alignment.split(',')
+                alignment_fields = alignment.split(',')
+                # Defensive check: skip malformed alignments
+                if len(alignment_fields) < 6:
+                    print(f"Warning: Skipping malformed alignment (expected 6 comma-separated fields, got {len(alignment_fields)}): {alignment}", file=sys.stderr)
+                    continue
+                segmentid, transcriptid, start, end, tx_strand, cigar = alignment.split(',')
                 # transcriptid already extracted above, no need to split again
                 transcriptid_pos = '\t'.join([transcriptid, start, end, tx_strand, cigar])
                 d_readlocus_transcripts[segmentid+str(n_locus)].append(transcriptid_pos)
@@ -59,14 +65,14 @@ def build_crls(build_crls_too, bed, merged_bed, crl_file, crl_share_cutoff, min_
                         continue
                     n_union_reads = len(l_locusreads | l_crlreads)  # Use | for set union
                     # jaccard similarity score
+                    # Defensive check: skip if union is empty (shouldn't happen if n_common_reads > 0)
+                    if n_union_reads == 0:
+                        continue
                     if n_common_reads / float(n_union_reads) < crl_share_cutoff:
                         continue
                     # identical loci are multi-mapped loci with the same set of identical set of multi-mapped reads
                     l_matched_crls.append(crlid)
                     already_crl_member = True
-                elif len(l_crlreads) < lower_bound:
-                    # Since we're going in reverse order and sorted by size, we can break early
-                    break
 
             # n_locus is not a member of any crl, hence create a new crl
             if not already_crl_member:
@@ -92,6 +98,9 @@ def build_crls(build_crls_too, bed, merged_bed, crl_file, crl_share_cutoff, min_
         for l_locusreads in d_crlloci.values():
             l_crlreads.update(l_locusreads)  # Use set.update() instead of extend()
         crl_reads_len = len(l_crlreads)
+        # Defensive check: skip CRLs with zero reads (shouldn't happen, but protect against division by zero)
+        if crl_reads_len == 0:
+            continue
         for locusid, l_locusreads in d_crlloci.items():
             locus_share = len(l_locusreads) / float(crl_reads_len)
             d_locus_crl_share[locusid][crlid] = locus_share
@@ -140,6 +149,10 @@ def build_crls(build_crls_too, bed, merged_bed, crl_file, crl_share_cutoff, min_
             b = line.rstrip('\n').split('\t')
             pos = ':'.join([b[0], b[1], b[2], b[5]])
             desc = b[3].split(',')  # in the description column of the bed file,alignments are seperated by ';'
+            # Defensive check: skip if desc is empty
+            if len(desc) < 1:
+                print(f"Warning: Skipping line with empty description: {line[:100]}", file=sys.stderr)
+                continue
             segmentid = desc[0]
             transcriptid_pos = '\t'.join(desc[1:])
             # at this level reads have unique ids preceeded by a serialnumber
@@ -159,16 +172,16 @@ def build_crls(build_crls_too, bed, merged_bed, crl_file, crl_share_cutoff, min_
                 crl_reads_len = None
             for locusid, l_locusreads in d_crlloci.items():
                 if crl_reads_len is not None:
-                    locus_share = len(l_locusreads) / float(crl_reads_len)
+                    # Defensive check: skip if crl_reads_len is 0 (shouldn't happen, but protect against division by zero)
+                    if crl_reads_len == 0:
+                        locus_share = 0.0
+                    else:
+                        locus_share = len(l_locusreads) / float(crl_reads_len)
                 else:
                     locus_share = 1.0
-                # Cache sorted reads to avoid sorting multiple times
-                sorted_reads = sorted(l_locusreads)
-                for segmentid in sorted_reads:
+                for segmentid in sorted(l_locusreads):
                     segment_key = segmentid + str(locusid)
-                    # Cache sorted transcript positions
-                    sorted_transcripts = sorted(d_readlocus_transcripts[segment_key])
-                    for transcriptid_pos in sorted_transcripts:
+                    for transcriptid_pos in sorted(d_readlocus_transcripts[segment_key]):
                         entry = "\t".join([segmentid,
                                            transcriptid_pos.split('\t')[0],
                                            str(locusid),
@@ -193,10 +206,9 @@ def em(d_alpha, d_rho, library_size, l_multimap_readids, em_threshold):
         d_rho_old = dict(d_rho)  # Shallow copy - safe because values are immutable floats
         d_rho.clear()
         # iterate through multi-mapped read segments
+        # Note: l_multimap_readids only contains reads with multiple CRLs (len > 1)
         for readid in l_multimap_readids:
             read_crls = d_alpha[readid]
-            if len(read_crls) == 1:
-                continue
             # Pre-compute total abundance to avoid repeated lookups
             total_crl_rel_abundancy = sum(d_rho_old[crlid] for crlid in read_crls)
             if total_crl_rel_abundancy > 0:
@@ -204,25 +216,24 @@ def em(d_alpha, d_rho, library_size, l_multimap_readids, em_threshold):
                 for crlid in read_crls:
                     d_alpha[readid][crlid] = d_rho_old[crlid] * inv_total
 
-        # Accumulate rho more efficiently - only iterate multimapped reads
-        # (uniquely mapped reads already have their contribution in d_alpha)
-        for readid in l_multimap_readids:
-            read_crls = d_alpha[readid]
-            for crlid in read_crls:
+        for readid in d_alpha.keys():
+            for crlid in d_alpha[readid]:
                 d_rho[crlid] += d_alpha[readid][crlid]
-        # Add contributions from uniquely mapped reads (they map to single CRL)
-        for readid in d_alpha:
-            if readid not in l_multimap_readids:  # Uniquely mapped
-                for crlid in d_alpha[readid]:
-                    d_rho[crlid] += d_alpha[readid][crlid]
         # relative abundancies
         # M-step
         sum_of_rho_diff = 0
-        inv_library_size = 1.0 / float(library_size)
-        for crlid in d_rho:
-            new_rho = d_rho[crlid] * inv_library_size
-            sum_of_rho_diff += abs(new_rho - d_rho_old[crlid])
-            d_rho[crlid] = new_rho
+        # Defensive check: avoid division by zero if library_size is 0 (shouldn't happen, but protect)
+        if library_size > 0:
+            inv_library_size = 1.0 / float(library_size)
+            for crlid in d_rho:
+                new_rho = d_rho[crlid] * inv_library_size
+                sum_of_rho_diff += abs(new_rho - d_rho_old[crlid])
+                d_rho[crlid] = new_rho
+        else:
+            # If library_size is 0, set all rho to 0 and break (converged to invalid state)
+            for crlid in d_rho:
+                d_rho[crlid] = 0.0
+            break
         i += 1
     return d_alpha
 
@@ -230,16 +241,11 @@ def em(d_alpha, d_rho, library_size, l_multimap_readids, em_threshold):
 def tpm(d_crl_expression, d_crl_loci_len):
     total_rpk = 0
     d_crl_tpm = defaultdict(float)
-    # Cache sorted keys and sorted lengths to avoid repeated sorting
+    # Cache sorted keys to avoid repeated sorting (used in two loops)
     sorted_crlids = sorted(d_crl_expression.keys())
-    d_sorted_lengths = {}
-    for crlid in sorted_crlids:
-        if crlid not in d_sorted_lengths:
-            d_sorted_lengths[crlid] = sorted(d_crl_loci_len[crlid].values())
-    
     for crlid in sorted_crlids:
         crl_expression = d_crl_expression[crlid]
-        crl_len = chira_utilities.median(d_sorted_lengths[crlid]) / 1000.0  # length in kbs
+        crl_len = chira_utilities.median(sorted(d_crl_loci_len[crlid].values())) / 1000.0  # length in kbs
         if crl_len > 0:  # Avoid division by zero
             rpk = crl_expression / crl_len
             d_crl_tpm[crlid] = rpk
@@ -258,20 +264,29 @@ def quantify_crls(crl_file, em_threshold):
     l_multimap_readids = []
     d_alpha = defaultdict(lambda: defaultdict(float))
     d_rho = defaultdict(float)
-    # Cache file lines to avoid re-reading
-    file_lines = []
 
     # Use context manager for file handling (more efficient)
     with open(crl_file, "r") as fh_crl_file:
         for line in fh_crl_file:
-            file_lines.append(line)  # Cache line for later use
             f = line.rstrip("\n").split("\t")
             # consider the segment id and quantify individula segments than whole reads
+            # Defensive check: skip malformed lines
+            if len(f) < 10:
+                print(f"Warning: Skipping malformed line (expected at least 10 fields, got {len(f)}): {line[:100]}", file=sys.stderr)
+                continue
             readid = f[0]
             locusid = f[2]
             crlid = f[3]
             pos = f[9].split(':')
-            locuslength = int(pos[-2]) - int(pos[-3]) + 1
+            # Defensive check: pos should have at least 3 elements (chr:start:end:strand format)
+            if len(pos) < 3:
+                print(f"Warning: Skipping line with invalid position format (expected chr:start:end:strand, got {f[9]}): {line[:100]}", file=sys.stderr)
+                continue
+            try:
+                locuslength = int(pos[-2]) - int(pos[-3]) + 1
+            except (ValueError, IndexError) as e:
+                print(f"Warning: Skipping line with invalid position values (pos={f[9]}): {e}", file=sys.stderr)
+                continue
             # a single locus can belong to multiple crls
             # one read can be part of multiple crls
             d_alpha[readid][crlid] = 1
@@ -287,8 +302,15 @@ def quantify_crls(crl_file, em_threshold):
 
     library_size = sum(d_rho.values())
     # intial relative abundancies
-    for crlid in d_rho:
-        d_rho[crlid] = d_rho[crlid] / library_size
+    # Defensive check: avoid division by zero if library_size is 0 (shouldn't happen, but protect)
+    if library_size > 0:
+        for crlid in d_rho:
+            d_rho[crlid] = d_rho[crlid] / library_size
+    else:
+        # If library_size is 0, all reads have no CRL assignments - set all to 0
+        print("Warning: library_size is 0, no reads have CRL assignments", file=sys.stderr)
+        for crlid in d_rho:
+            d_rho[crlid] = 0.0
 
     d_res = em(d_alpha, d_rho, library_size, l_multimap_readids, em_threshold)
 
@@ -299,7 +321,7 @@ def quantify_crls(crl_file, em_threshold):
 
     d_crl_tpm = tpm(d_crl_expression, d_crl_loci_len)
 
-    return d_alpha, d_crl_tpm, file_lines
+    return d_alpha, d_crl_tpm
 
 
 if __name__ == "__main__":
@@ -355,18 +377,30 @@ if __name__ == "__main__":
                os.path.join(args.outdir, 'loci.txt'), args.crl_share, args.min_locus_size)
     chira_utilities.print_w_time("END: Build CRLs")
     chira_utilities.print_w_time("START: Quantify CRLs")
-    d_read_crl_fractions, d_crl_tpms, file_lines = quantify_crls(os.path.join(args.outdir, 'loci.txt'), args.em_thresh)
+    d_read_crl_fractions, d_crl_tpms = quantify_crls(os.path.join(args.outdir, 'loci.txt'), args.em_thresh)
     chira_utilities.print_w_time("END: Quantify CRLs")
     chira_utilities.print_w_time("START: Write CRLs")
-    # Use cached file lines instead of re-reading file
-    with open(os.path.join(args.outdir, 'loci.counts.temp'), "w") as fh_out:
-        for l in file_lines:
-            k = l.rstrip("\n").split("\t")
-            read_id = k[0]
-            crl_id = k[3]
-            fh_out.write("\t".join([l.strip("\n"),
-                                    "{:.2f}".format(d_read_crl_fractions[read_id][crl_id]),
-                                    "{:.4g}".format(d_crl_tpms[crl_id])]) + "\n")
+    # Re-read file to write output (OS will cache it, so second read is fast)
+    with open(os.path.join(args.outdir, 'loci.txt'), "r") as fh_in:
+        with open(os.path.join(args.outdir, 'loci.counts.temp'), "w") as fh_out:
+            for l in fh_in:
+                k = l.rstrip("\n").split("\t")
+                # Defensive check: skip malformed lines
+                if len(k) < 4:
+                    print(f"Warning: Skipping malformed line in loci file (expected at least 4 fields, got {len(k)}): {l[:100]}", file=sys.stderr)
+                    continue
+                read_id = k[0]
+                crl_id = k[3]
+                # Defensive check: skip if read_id or crl_id not in dictionaries
+                if read_id not in d_read_crl_fractions or crl_id not in d_read_crl_fractions[read_id]:
+                    print(f"Warning: Skipping line with missing read_id or crl_id in fractions: read_id={read_id}, crl_id={crl_id}", file=sys.stderr)
+                    continue
+                if crl_id not in d_crl_tpms:
+                    print(f"Warning: Skipping line with missing crl_id in TPMs: crl_id={crl_id}", file=sys.stderr)
+                    continue
+                fh_out.write("\t".join([l.strip("\n"),
+                                        "{:.2f}".format(d_read_crl_fractions[read_id][crl_id]),
+                                        "{:.4g}".format(d_crl_tpms[crl_id])]) + "\n")
     chira_utilities.print_w_time("END: Write CRLs")
     os.remove(os.path.join(args.outdir, 'loci.txt'))
     chira_utilities.print_w_time("START: Sort CRLs file by read name")

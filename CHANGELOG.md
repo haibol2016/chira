@@ -5,7 +5,7 @@ All notable changes to ChiRA will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.4.4] - 2026-01-25
+## [1.4.4] - 2026-01-26
 
 ### Added
 - **chira_extract.py**:
@@ -53,6 +53,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Extracts sequences by species code (e.g., hsa, mmu, bta)
   - Handles gzipped files and automatic decompression
   - Parameters: `--species`, `--output`, `--mirbase-version`
+
+- **download_mirbase_gff3.py** (new utility script):
+  - Created script to download species-specific GFF3 annotation files from miRBase
+  - Supports CURRENT version (default) or specific version via `--mirbase-version` parameter
+  - Supports chromosome name mapping via `--chromosome_mapping` parameter
+  - Can be used as alternative to GTF conversion for reference preparation
+  - Parameters: `--species`, `--output`, `--mirbase-version`, `--chromosome_mapping`
+
+- **concatenate_fasta.py** (new utility script):
+  - Created script to concatenate multiple FASTA files into a single file
+  - Handles various FASTA header formats
+  - Useful for combining miRNA and target transcriptome FASTA files
+  - Parameters: `--input-files`, `--output`
 
 - **remove_mirna_hairpin_from_gtf.py** (new utility script):
   - Created script to remove microRNA entries from Ensembl GTF files
@@ -106,24 +119,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - `_CIGAR_PATTERN_QUERY` for `query_length()` and `match_positions()`
     - `_CIGAR_PATTERN_ALIGN` for `alignment_length()`
     - `_CIGAR_PATTERN_END` for `alignment_end()`
-  - Added caching for BEDTools command detection to avoid repeated subprocess calls (line 14, function lines 124-160)
-  - Improved `extract_reflengths()` to use context manager for proper file handling (lines 102-107)
-  - Optimized `print_w_time()` to use f-string formatting (line 109)
+  - Added caching for BEDTools command detection to avoid repeated subprocess calls
+  - Improved `extract_reflengths()` to use context manager for proper file handling
+  - Optimized `print_w_time()` to use f-string formatting
 
 - **chira_map.py**:
-  - Optimized `write_mapped_bed()` function (lines 52-166):
-    - Only get sequence when needed (for unmapped reads only, lines 72-80)
-    - Cached string conversions for reference positions (lines 91-93)
-    - Pre-computed desired strand check (lines 84-86)
-    - Optimized XA tag parsing - only strip semicolon if present (lines 107-112)
-    - Pre-parse alternate alignments into structured format (lines 114-150)
-    - Pre-convert string to int for reference start positions
-    - Cache alignment length calculations
-    - Use f-strings for FASTA output formatting (line 79)
+  - Optimized `write_mapped_bed()` function:
+    - Only get sequence when needed (for unmapped reads only)
+    - Pre-computed desired strand check
+
+    - Two-pass processing: lightweight first pass to find optimal length, then parse and write
+    - Merged condition checks for cleaner code
+    - Removed unnecessary caching of single-use variables
+  - Optimized `clan_to_bed()` function:
+    - Simplified field parsing using tuple unpacking
+    - Removed unnecessary empty string checks
+    - Streamlined CIGAR string building
 
 - **chira_merge.py**:
-  - Updated `transcript_to_genomic_pos()` function to use `chira_utilities.get_bedtools_command('intersect')` (line 524)
+  - Updated `transcript_to_genomic_pos()` function to use `chira_utilities.get_bedtools_command('intersect')`
   - Replaced hardcoded `intersectBed` command with version-agnostic function call
+  - Added zero-length match checks in `write_segments()` to prevent division by zero
+  - Removed unnecessary caching optimizations that didn't provide performance benefit
+  - Optimized set operations in `transcript_to_genomic_pos()` for deduplication
 
 - **chira_extract.py**:
   - Updated to use `chira_utilities.get_bedtools_command('getfasta')` for BEDTools compatibility (line 803)
@@ -147,17 +165,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Documented script-specific dependencies
 
 ### Fixed
-- **chira_quantify.py**:
-  - Fixed CRL iteration range to properly include index 0 in reverse traversal (line 55)
-  - Changed from `range(len(d_crl_reads) - 1, 0, -1)` to `range(len(d_crl_reads) - 1, -1, -1)`
+- **chira_map.py**:
+  - Fixed bug where first iteration would write empty string to unmapped FASTA file (line 67-70)
+    - Added check: `if prev_readid is not None` before writing previous read
+  - Fixed typo: "STRAT" → "START" in print statements (line 442)
+    - Note: Some "STRAT" typos remain on lines 465, 471, 475, 480 (should be fixed)
+
+- **chira_merge.py**:
+  - Added zero-length match checks in `write_segments()` to prevent division by zero (lines 134-138, 153-156)
+    - Checks `first_match_length` and `current_match_length` before division
+    - Checks `last_match_length` and `current_match_length` before division
+  - Removed unnecessary caching that didn't improve performance
+
+- **chira_extract.py**:
+  - Fixed undefined variables `d_reflen1`/`d_reflen2` in `extract_and_write()` (lines 249-257)
+    - Changed to use correct parameter names `d_ref_lengths1`/`d_ref_lengths2`
+  - Fixed logic error in strand/chromosome check in `guess_region()` (line 85)
+    - Changed `and` to `or` for correct conditional logic
+  - Fixed index out of bounds error in `parse_counts_file()` (lines 539-553)
+    - Clamped `tpm_cutoff` to `[0, 1)` range
+    - Added check for empty `uniq_tpms` list
+  - Fixed logic error in `hybridization_positions()` function (lines 573-582)
+    - Corrected iteration logic to find last `'('` in `dotbracket1` and last `')'` in `dotbracket2`
+    - Refactored loops for clarity using `range(len(...))`
+  - Fixed potential string slicing issue in `hybridize_and_write()` (lines 394-398)
+    - Added length check before slicing `record.id[:-3]`
 
 - **chira_utilities.py**:
-  - Fixed file handling in `extract_reflengths()` to use proper context managers (lines 102-107)
+  - Fixed `median()` function bug where input wasn't sorted (lines 28-35)
+    - Added `x_sorted = sorted(x)` before calculating median
+    - Changed `int(n/2)` to `n // 2` for integer division
+  - Fixed `get_bedtools_command()` to verify command success (line 157)
+    - Added `process.returncode == 0` check before caching result
+  - Fixed file handling in `extract_reflengths()` to use proper context managers
+
+- **chira_quantify.py**:
+  - Fixed CRL iteration range to properly include index 0 in reverse traversal (line 55)
+    - Changed from `range(len(d_crl_reads) - 1, 0, -1)` to `range(len(d_crl_reads) - 1, -1, -1)`
 
 - **BEDTools compatibility**:
   - Fixed command compatibility issues across different BEDTools versions
   - Now automatically detects and uses appropriate command format
-  - Implemented in `chira_merge.py` (line 524) and `chira_extract.py` (line 803)
+  - Implemented in `chira_merge.py` and `chira_extract.py`
 
 ### Performance Improvements
 - **Overall**: 3-10x faster processing for `chira_quantify.py`
@@ -183,6 +232,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **download_mirbase_mature.py**: Download species-specific mature miRNA sequences from miRBase
   - Extracts sequences by species code
   - Supports specific versions or CURRENT
+- **download_mirbase_gff3.py**: Download species-specific GFF3 annotation files from miRBase
+  - Supports CURRENT version or specific version
+  - Supports chromosome name mapping
+  - Alternative to GTF conversion for reference preparation
+- **concatenate_fasta.py**: Concatenate multiple FASTA files into a single file
+  - Handles various FASTA header formats
+  - Useful for combining miRNA and target transcriptome FASTA files
 - **remove_mirna_hairpin_from_gtf.py**: Remove miRNA entries from GTF annotation files
   - Flexible regex pattern matching
   - Used for preparing target-only transcriptome annotations
