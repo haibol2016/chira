@@ -11,6 +11,7 @@ from BCBio import GFF
 from Bio import SeqIO
 import subprocess
 import math
+import gzip
 
 
 d_gene_annotations = defaultdict(lambda: defaultdict(str))
@@ -352,13 +353,22 @@ def extract_and_write(readid, l_read_alignments, l_loci_bed, d_ref_lengths1, d_r
 
 
 def write_chimeras(chunk_start, chunk_end, total_read_count, d_ref_lengths1, d_ref_lengths2, hybridize,
-                   chimeric_overlap, f_gtf, outdir, crl_file, tpm_threshold, score_cutoff, n, sample_name):
+                   chimeric_overlap, f_gtf, outdir, crl_file, tpm_threshold, score_cutoff, n, sample_name, compress=False):
     d_regions = defaultdict()
     l_loci_bed = set()
     file_chimeras = os.path.join(outdir, sample_name + ".chimeras." + n)
     file_singletons = os.path.join(outdir, sample_name + ".singletons." + n)
+    # Intermediate files are NOT compressed - only final merged files are compressed
+    # This avoids CPU overhead during parallel processing and merge operations
+    
+    # Open files (intermediate files are always uncompressed)
+    open_func = open
+    open_mode = "w"
+    
     # make bed entry for extracing locus sequence and hybridizing
-    with open(file_chimeras, "w") as fh_chimeras, open(file_singletons, "w") as fh_singletons, open(crl_file) as fh_crl:
+    with open_func(file_chimeras, open_mode) as fh_chimeras, \
+         open_func(file_singletons, open_mode) as fh_singletons, \
+         open(crl_file) as fh_crl:
         prev_readid = None
         l_readlines = []
         read_count = 0
@@ -384,8 +394,10 @@ def write_chimeras(chunk_start, chunk_end, total_read_count, d_ref_lengths1, d_r
                 l_readlines = []
             l_readlines.append(line)
 
-        # write last read info
-        if read_count >= total_read_count:
+        # write last read info if it's within our chunk
+        # At end of file, the last read is still in l_readlines and hasn't been processed
+        # Process it if it's within our chunk range
+        if l_readlines and chunk_start <= read_count + 1 <= chunk_end:
             l_read_alignments = filter_alignments(l_readlines, tpm_threshold, score_cutoff)
             extract_and_write(readid, l_read_alignments, l_loci_bed, d_ref_lengths1, d_ref_lengths2, f_gtf,
                               d_regions, chimeric_overlap, fh_chimeras, fh_singletons, hybridize)
@@ -397,7 +409,7 @@ def write_chimeras(chunk_start, chunk_end, total_read_count, d_ref_lengths1, d_r
                 fh_bed.write(bed_line + "\n")
 
 
-def hybridize_and_write(outdir, intarna_params, n, sample_name):
+def hybridize_and_write(outdir, intarna_params, n, sample_name, compress=False):
     d_loci_seqs = defaultdict()
     fa_seq = SeqIO.parse(open(os.path.join(outdir, "loci.fa.") + n), 'fasta')
     for record in fa_seq:
@@ -412,7 +424,17 @@ def hybridize_and_write(outdir, intarna_params, n, sample_name):
 
     d_hybrids = defaultdict()
     file_chimeras = os.path.join(outdir, sample_name + ".chimeras." + n)
-    with open(file_chimeras) as fh_chimeras, open(os.path.join(outdir, sample_name + ".chimeras-r." + n), "w") as fh_out:
+    # Intermediate files are NOT compressed - only final merged files are compressed
+    output_file = os.path.join(outdir, sample_name + ".chimeras-r." + n)
+    # Intermediate files are NOT compressed - only final merged files are compressed
+    
+    # Open files (intermediate files are always uncompressed)
+    open_func = open
+    open_mode_read = "r"
+    open_mode_write = "w"
+    
+    with open_func(file_chimeras, open_mode_read) as fh_chimeras, \
+         open_func(output_file, open_mode_write) as fh_out:
         for line in fh_chimeras:
             seq1 = seq2 = dotbracket = pos = energy = "NA"
             a = line.rstrip("\n").split("\t")
@@ -574,17 +596,52 @@ def parse_counts_file(crl_file, tpm_cutoff):
     return read_count, tpm_threshold
 
 
-def merge_files(inprefix, outfile, header, r):
-    temp_files = ""
+def merge_files(inprefix, outfile, header, r, compress=False):
+    # Use shell commands for better performance with large files
+    # This avoids loading all data into memory and leverages system sort
+    # Intermediate files are always uncompressed - only final output is compressed
+    temp_files = []
     for i in range(r):
-        temp_files += " " + inprefix + "." + str(i)
-    os.system("cat " + temp_files +
-              " | sort -u | sed '1s/^/" + header + "\\n/' > " +
-              outfile)
+        temp_file = inprefix + "." + str(i)
+        # Intermediate files are NOT compressed
+        if os.path.exists(temp_file):
+            temp_files.append(temp_file)
+    
+    if not temp_files:
+        # No files to merge
+        return
+    
+    # Write header first, then append sorted unique lines
+    # This avoids shell escaping issues with header content
+    # Final output file is compressed if requested (intermediate files are NOT compressed)
+    open_func = gzip.open if compress else open
+    open_mode = "wt" if compress else "w"
+    
+    with open_func(outfile, open_mode) as fh_out:
+        # Write header first
+        fh_out.write(header + "\n")
+        
+        # Use shell commands to merge and sort files (more efficient for large files)
+        # Intermediate files are uncompressed, so we can use cat directly
+        escaped_files = " ".join([f"'{f}'" for f in temp_files])
+        cmd = f"cat {escaped_files} | sort -u"
+        
+        # Execute command and write output to file
+        process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, 
+                                   stderr=subprocess.PIPE, universal_newlines=True)
+        stdout, stderr = process.communicate()
+        
+        if process.returncode != 0:
+            sys.stderr.write(f"Warning: merge_files command failed: {stderr}\n")
+        else:
+            # Write sorted unique lines (header already written)
+            # Compression happens automatically if open_func is gzip.open
+            fh_out.write(stdout)
 
     # Clean up intermediate per-process files after merging
     for i in range(r):
         temp_file = inprefix + "." + str(i)
+        # Intermediate files are NOT compressed
         if os.path.exists(temp_file):
             os.remove(temp_file)
 
@@ -605,9 +662,17 @@ def hybridization_positions(dotbracket1, dotbracket2):
     return end1, end2
 
 
-def write_interaction_summary(outdir, sample_name):
+def write_interaction_summary(outdir, sample_name, compress=False):
     d_interactions = defaultdict(lambda: defaultdict(list))
-    with open(os.path.join(outdir, sample_name + ".chimeras.txt")) as fh_in:
+    chimeras_file = os.path.join(outdir, sample_name + ".chimeras.txt")
+    if compress:
+        chimeras_file += ".gz"
+    
+    # Open file with gzip if compression is enabled
+    open_func = gzip.open if compress else open
+    open_mode = "rt" if compress else "r"
+    
+    with open_func(chimeras_file, open_mode) as fh_in:
         next(fh_in)
         for line in fh_in:
             f = line.rstrip("\n").split("\t")
@@ -778,6 +843,9 @@ if __name__ == "__main__":
     parser.add_argument('-n', '--sample_name', action='store', dest='sample_name', required=True,
                         metavar='', help='Sample name prefix for output files')
 
+    parser.add_argument('-z', '--gzip', action='store_true', dest='compress',
+                        help='Compress output files (chimeras and singletons) with gzip')
+
     parser.add_argument('-v', '--version', action='version', version='%(prog)s 1.4.4')
 
     args = parser.parse_args()
@@ -799,6 +867,7 @@ if __name__ == "__main__":
         print('Reference genomic fasta file         : ' + args.f_ref)
     print('Summarize interactions at loci level : ' + str(args.summarize))
     print('Sample name                            : ' + args.sample_name)
+    print('Compress output files with gzip        : ' + str(args.compress))
     print("===================================================================")
 
     if args.hybridize and args.f_gtf and not args.f_ref:
@@ -835,7 +904,7 @@ if __name__ == "__main__":
         print(k, s, e, no_of_reads)
         j = Process(target=write_chimeras, args=(s, e, no_of_reads, d_reflen1, d_reflen2, args.hybridize,
                                                  args.chimeric_overlap, args.f_gtf, args.outdir,
-                                                 args.crl_file, tpm_cutoff_value, args.score_cutoff, str(k), args.sample_name))
+                                                 args.crl_file, tpm_cutoff_value, args.score_cutoff, str(k), args.sample_name, args.compress))
         jobs.append(j)
 
     for j in jobs:
@@ -845,6 +914,12 @@ if __name__ == "__main__":
 
     # file name prefixes
     chimeras_file = os.path.join(args.outdir, args.sample_name + ".chimeras.txt")
+    singletons_file = os.path.join(args.outdir, args.sample_name + ".singletons.txt")
+    # Add .gz extension if compression is enabled
+    if args.compress:
+        chimeras_file += ".gz"
+        singletons_file += ".gz"
+    
     chimeras_prefix = os.path.join(args.outdir, args.sample_name + ".chimeras")
     singletons_prefix = os.path.join(args.outdir, args.sample_name + ".singletons")
 
@@ -892,7 +967,7 @@ if __name__ == "__main__":
         jobs = []
         # hybridize chimeric reads
         for k in range(args.processes):
-            j = Process(target=hybridize_and_write, args=(args.outdir, common_intarna_params, str(k), args.sample_name))
+            j = Process(target=hybridize_and_write, args=(args.outdir, common_intarna_params, str(k), args.sample_name, args.compress))
             jobs.append(j)
 
         for j in jobs:
@@ -947,7 +1022,7 @@ if __name__ == "__main__":
                                  "hybridization_positions",
                                  "hybridization_mfe_kcal_mol",
                                  "mirna_read_position"])
-    merge_files(chimeras_prefix, chimeras_file, header_chimeras, args.processes)
+    merge_files(chimeras_prefix, chimeras_file, header_chimeras, args.processes, args.compress)
     header_singletons = "\t".join(["read_id",
                                    "transcript_id",
                                    "gene_id",
@@ -963,9 +1038,8 @@ if __name__ == "__main__":
                                    "crl_group_id",
                                    "tpm",
                                    "alignment_score"])
-    singletons_file = os.path.join(args.outdir, args.sample_name + ".singletons.txt")
-    merge_files(singletons_prefix, singletons_file, header_singletons, args.processes)
+    merge_files(singletons_prefix, singletons_file, header_singletons, args.processes, args.compress)
     print(str(datetime.datetime.now()), " END: multiprocessing")
     if args.summarize:
-        write_interaction_summary(args.outdir, args.sample_name)
+        write_interaction_summary(args.outdir, args.sample_name, args.compress)
 

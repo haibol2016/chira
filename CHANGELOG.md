@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **chira_extract.py**:
   - Added `--sample_name` parameter (required) for customizable output file names (line 707)
   - Output files now use format: `{sample_name}.chimeras.txt`, `{sample_name}.singletons.txt`, `{sample_name}.interactions.txt`
+  - Added `--gzip` option to compress output files (chimeras and singletons) with gzip (lines 835-836, 844)
+    - Only final merged files are compressed (intermediate per-process files remain uncompressed for optimal performance)
+    - Compressed files have `.gz` extension (e.g., `{sample_name}.chimeras.txt.gz`)
+    - Interactions file is always uncompressed for compatibility with downstream tools
+    - Compression improves I/O performance for large files and saves disk space
   - Added header row to interactions output file with all column descriptions (lines 614-622)
   - Added comment lines in interactions file explaining how to identify miRNA vs target loci (lines 625-626)
   - Added `mirna_position` column to `{sample_name}.chimeras.txt` output (lines 268-280, 292, 902)
@@ -158,12 +163,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - Chimeras file: Updated all 34 column names (e.g., `tagid` → `read_id`, `txid1` → `transcript_id_1`, `mfe` → `hybridization_mfe_kcal_mol`)
     - Singletons file: Updated all 14 column names (e.g., `tagid` → `read_id`, `txid` → `transcript_id`)
     - Interactions file: Updated all 24 column names (e.g., `read_count` → `supporting_read_count`, `locus1_chr` → `locus_1_chromosome`)
+  - Refactored `merge_files()` function to use Python for header writing and shell commands for sorting (lines 597-644)
+    - Header is written directly in Python to avoid shell escaping issues
+    - Uses `subprocess.Popen()` for better error handling
+    - Improved file path escaping for shell safety
+    - Intermediate files are always uncompressed (only final merged files are compressed if `--gzip` is used)
 
 - **README.md**:
   - Added version information and brief summary of improvements
   - Added note about modified version and GPL compliance
   - Streamlined to focus on user-facing documentation, with detailed changes in CHANGELOG.md
   - Updated to reflect new header names in output files (chimeras, singletons, interactions)
+  - Added documentation for `--gzip` option in `chira_extract.py`
+  - Added Singularity/Apptainer support documentation with reference to `SINGULARITY_SETUP.md`
+  - Updated installation section to include both Docker and Singularity examples
   - Fixed typo: `--summerize` → `--summarize` in parameter documentation (lines 577, 651)
   - Updated all column name references to match new descriptive headers
 
@@ -211,6 +224,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - Refactored loops for clarity using `range(len(...))`
   - Fixed potential string slicing issue in `hybridize_and_write()` (lines 394-398)
     - Added length check before slicing `record.id[:-3]`
+  - Fixed logic bug in `write_chimeras()` for processing last read (line 398)
+    - Changed condition from `if read_count >= total_read_count:` to `if l_readlines and chunk_start <= read_count + 1 <= chunk_end:`
+    - Ensures last read is processed correctly when it's within the chunk range
   - Fixed typos: "prioroty" → "priority" (line 763), "summerize" → "summarize" (lines 771, 772, 796, 965)
   - Fixed typo: "Outpur direcoty" → "Output directory" (line 782)
   - Enhanced UTR parsing to support Ensembl-specific UTR types (lines 445, 475-484, 53-65, 85-95)
@@ -293,7 +309,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Includes bioinformatics tools (bwa, samtools, bedtools, intarna)
   - Sets up proper environment variables and PATH
   - Makes Python scripts executable
+  - Includes entrypoint script that automatically sets up conda environment, PATH, and PYTHONPATH
+  - Symlinks all conda binaries to `/usr/local/bin` for universal PATH access
   - Ready-to-use containerized environment for ChiRA pipeline
+
+### Singularity/Apptainer Support
+- **SINGULARITY_SETUP.md**: Comprehensive guide for using ChiRA with Singularity/Apptainer containers
+  - Installation instructions for Linux and macOS
+  - Docker image to Singularity conversion methods
+  - Environment setup using entrypoint script (recommended approach)
+  - Environment isolation flags and best practices
+  - Troubleshooting guide for common PATH and environment issues
+  - Complete reference for all Singularity options and flags
 
 ## [1.4.3] - Previous Version
 - Original version before performance optimizations and new features

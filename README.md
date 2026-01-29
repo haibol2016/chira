@@ -28,11 +28,13 @@ This version includes significant performance optimizations and new features. Fo
 **New Features:**
 - Added `--sample_name` parameter to `chira_extract.py` for customizable output file names
 - Output files now use format: `{sample_name}.chimeras.txt`, `{sample_name}.singletons.txt`, `{sample_name}.interactions.txt`
+- Added `--gzip` option to `chira_extract.py` for compressing large output files (saves disk space, faster I/O for large files)
 - Added header rows to interactions output file with column descriptions
 - Added `mirna_position` column to chimeras output indicating read orientation (miRNA_first or miRNA_last)
 - Automatic BEDTools version detection - works with both old and new command formats
 - New utility scripts for reference file preparation (see Utility Scripts section)
 - Docker support with pre-installed dependencies (see Docker Support section)
+- Singularity/Apptainer support - see [SINGULARITY_SETUP.md](SINGULARITY_SETUP.md) for detailed instructions
 
 **Compatibility:**
 - BEDTools: Automatically supports both `intersectBed`/`fastaFromBed` (old) and `bedtools intersect`/`bedtools getfasta` (new)
@@ -51,15 +53,28 @@ For complete details with line-by-line changes, please refer to [CHANGELOG.md](C
 
 ## Installation
 
-### Recommended: Docker Installation
+### Recommended: Container Installation
 
-**The easiest way to use ChiRA is with the provided Docker image**, which includes all dependencies pre-installed:
+**The easiest way to use ChiRA is with the provided container images**, which include all dependencies pre-installed:
 
+**Docker:**
 ```bash
 # Run ChiRA commands
 docker run --rm -v $(pwd)/data:/app/data -v $(pwd)/output:/app/output \
   docker.io/nemat1976/chiraplus:v0.0.1 chira_collapse.py -i data/input.fastq -o output/collapsed.fasta
 ```
+
+**Singularity/Apptainer (for HPC systems):**
+```bash
+# Pull image
+singularity pull docker://docker.io/nemat1976/chiraplus:v0.0.1
+
+# Run ChiRA commands (entrypoint script handles environment automatically)
+singularity exec -B $(pwd)/data:/app/data -B $(pwd)/output:/app/output \
+  chira_latest.sif chira_collapse.py -i data/input.fastq -o output/collapsed.fasta
+```
+
+For detailed Singularity/Apptainer setup and usage instructions, see [SINGULARITY_SETUP.md](SINGULARITY_SETUP.md).
 
 ### Docker Image Contents
 
@@ -575,10 +590,13 @@ chira_quantify.py -b segments.bed -m loci.txt -o output_dir -cs 0.7 -ls 10
 - `-acc, --accessibility`: Compute accessibility (`C` or `N`, default: `N`)
 - `-p, --processes`: Number of parallel processes (default: 1)
 - `-s, --summarize`: Summarize interactions at locus level
+- `-z, --gzip`: Compress output files (chimeras and singletons) with gzip (optional)
 
 **Outputs:**
 
-**1. `{sample_name}.chimeras.txt`** - Tabular file with chimeric read information in an extended BED format
+**Note:** If `--gzip` is specified, output files will have `.gz` extension (e.g., `{sample_name}.chimeras.txt.gz`, `{sample_name}.singletons.txt.gz`). Compression is applied only to final merged files, not intermediate files, for optimal performance.
+
+**1. `{sample_name}.chimeras.txt`** (or `.txt.gz` if `--gzip` is used) - Tabular file with chimeric read information in an extended BED format
 
 Header columns (34 total):
 - `read_id`: Read identifier (from collapsed FASTQ)
@@ -631,7 +649,7 @@ For **split reference** (when `-f2` is provided), the output is standardized so 
 
 In the **interactions file**, both orientations are merged into a single entry to avoid duplicates, but the `read_info` field in the chimeras file preserves the actual orientation information.
 
-**2. `{sample_name}.singletons.txt`** - Tabular file with singleton reads (non-chimeric alignments)
+**2. `{sample_name}.singletons.txt`** (or `.txt.gz` if `--gzip` is used) - Tabular file with singleton reads (non-chimeric alignments)
 
 Header columns (14 total):
 - `read_id`: Read identifier
@@ -648,7 +666,7 @@ Header columns (14 total):
 - `tpm`: TPM value
 - `alignment_score`: Alignment score
 
-**3. `{sample_name}.interactions.txt`** - Tabular file with detected interactions (if `--summarize` used)
+**3. `{sample_name}.interactions.txt`** - Tabular file with detected interactions (if `--summarize` used). This file is always uncompressed for compatibility with downstream analysis tools.
 
 Header columns (24 total):
 - `supporting_read_count`: Number of reads supporting this interaction
@@ -671,8 +689,13 @@ Header columns (24 total):
 
 **Usage Example:**
 ```bash
+# Basic usage
 chira_extract.py -l loci.txt -o output_dir -f1 ref1.fasta -n sample1 \
   -g annotation.gtf -r -s -tc 0.1 -sc 0.5
+
+# With gzip compression (recommended for large files)
+chira_extract.py -l loci.txt -o output_dir -f1 ref1.fasta -n sample1 \
+  -g annotation.gtf -r -s -tc 0.1 -sc 0.5 --gzip
 ```
 
 **Note:** The interactions file includes comments explaining how to identify miRNA vs target loci based on the `annotation_region_locus_1` and `annotation_region_locus_2` fields. miRNA annotations typically include: `miRNA`, `3p_mature_mir`, `5p_mature_mir`, `mature_mir`.

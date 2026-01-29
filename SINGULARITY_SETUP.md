@@ -10,10 +10,11 @@ This guide provides comprehensive instructions for using ChiRA with Singularity/
 2. [Installation](#installation)
 3. [Converting Docker Images to Singularity](#converting-docker-images-to-singularity)
 4. [Basic Usage](#basic-usage)
-5. [Best Practices](#best-practices)
-6. [Environment Isolation](#environment-isolation)
-7. [Troubleshooting](#troubleshooting)
-8. [Reference](#reference)
+5. [Environment Setup](#environment-setup)
+6. [Best Practices](#best-practices)
+7. [Environment Isolation](#environment-isolation)
+8. [Troubleshooting](#troubleshooting)
+9. [Reference](#reference)
 
 ---
 
@@ -30,25 +31,25 @@ sudo yum install -y singularity    # CentOS/RHEL
 # 2. Pull ChiRA image
 singularity pull docker://docker.io/nemat1976/chiraplus:v0.0.1
 
-# 3. Run ChiRA command
-singularity exec --no-home --cleanenv \
+# 3. Run ChiRA command (entrypoint script runs automatically)
+singularity exec \
   -B /path/to/data:/app/data \
   -B /path/to/output:/app/output \
   chira_latest.sif \
   chira_collapse.py -i data/input.fastq -o output/collapsed.fasta
 ```
 
-**Recommended command template:**
+**Recommended command template (entrypoint script handles environment automatically):**
 
 ```bash
 singularity exec \
-  --no-home \                    # Prevent host $HOME conflicts
-  --cleanenv \                   # Prevent host environment conflicts
   -B /host/data:/app/data:ro \   # Mount input data (read-only)
   -B /host/output:/app/output \  # Mount output directory
   chira_latest.sif \
   chira_collapse.py [options]
 ```
+
+**Note:** The entrypoint script automatically sets up PATH, PYTHONPATH, and conda environment. You don't need to specify `--no-home --cleanenv` unless you have specific isolation requirements (see [Environment Setup](#environment-setup) and [Environment Isolation](#environment-isolation) sections for details).
 
 ---
 
@@ -143,7 +144,7 @@ singularity build chira.sif docker-daemon://docker.io/nemat1976/chiraplus:v0.0.1
 
 ### Running Commands
 
-**Single command execution:**
+**Single command execution (entrypoint script runs automatically):**
 ```bash
 singularity exec chira_latest.sif chira_collapse.py --help
 ```
@@ -156,6 +157,8 @@ singularity exec \
   chira_latest.sif \
   chira_collapse.py -i data/input.fastq -o output/collapsed.fasta
 ```
+
+**Note:** The entrypoint script automatically sets up the environment (PATH, PYTHONPATH, conda). You don't need to specify isolation flags unless you have specific requirements (see [Environment Setup](#environment-setup) and [Environment Isolation](#environment-isolation) sections).
 
 **Interactive shell (for debugging):**
 ```bash
@@ -175,17 +178,17 @@ singularity shell \
 # Check image information
 singularity inspect chira_latest.sif
 
-# Test Python
-singularity exec --no-home --cleanenv chira_latest.sif python --version
+# Test Python (entrypoint script handles environment automatically)
+singularity exec chira_latest.sif python --version
 
-# Test ChiRA scripts
-singularity exec --no-home --cleanenv chira_latest.sif chira_collapse.py --help
+# Test ChiRA scripts (entrypoint script runs automatically)
+singularity exec chira_latest.sif chira_collapse.py --help
 
-# Verify tools are accessible
-singularity exec --no-home --cleanenv chira_latest.sif which python bwa samtools
+# Verify tools are accessible (entrypoint script handles PATH)
+singularity exec chira_latest.sif which python bwa samtools
 
-# Test Python package imports
-singularity exec --no-home --cleanenv chira_latest.sif \
+# Test Python package imports (entrypoint script handles PYTHONPATH)
+singularity exec chira_latest.sif \
   python -c "import Bio; import BCBio; import pysam; print('All packages OK')"
 ```
 
@@ -297,9 +300,11 @@ if [ ! -f "$IMAGE" ]; then
 fi
 
 # Run ChiRA with best practices
+# Entrypoint script runs automatically to set up environment
+# Isolation flags are optional - add if you have host environment conflicts
 singularity exec \
-  --no-home \                    # Isolate from host $HOME
-  --cleanenv \                   # Isolate from host environment
+  --no-home \                    # Optional: Isolate from host $HOME
+  --cleanenv \                   # Optional: Isolate from host environment
   -B "$DATA_DIR:/app/data:ro" \  # Read-only input
   -B "$OUTPUT_DIR:/app/output" \ # Read-write output
   -B "$TMP_DIR:/tmp" \           # Custom tmp location
@@ -319,63 +324,41 @@ fi
 
 ---
 
-## Environment Isolation
+## Environment Setup
 
-### Understanding Isolation Flags
+### Entrypoint Script (Recommended - Automatic Environment Setup)
 
-Singularity provides flags to control how the host environment interacts with the container:
-
-| Flag | What It Does | Use When |
-|------|--------------|----------|
-| `--no-home` | Prevents mounting host `$HOME` | Host has conflicting software in `~/.local/` or `~/.conda/` |
-| `--cleanenv` | Prevents host environment variables from entering container | Host `PATH`, `PYTHONPATH`, or `LD_LIBRARY_PATH` conflicts |
-| `--containall` | Maximum isolation (no `$HOME`, `/tmp`, or current directory mounts) | Need complete filesystem isolation |
-
-### Recommended Approach: Isolation Flags
-
-**For most cases, use `--no-home --cleanenv`:**
-
-```bash
-singularity exec \
-  --no-home \      # Prevent host $HOME from shadowing container tools
-  --cleanenv \     # Prevent host PATH/PYTHONPATH from interfering
-  chira_latest.sif \
-  chira_collapse.py [options]
-```
-
-**Why this works:**
-- `--no-home`: Prevents host `$HOME` (which may contain `~/.local/bin/python`, `~/.conda/`, etc.) from shadowing container tools
-- `--cleanenv`: Prevents host environment variables from interfering with container's PATH and PYTHONPATH
-
-### Alternative Approach: Entrypoint Script (Recommended for PATH Issues)
+**The entrypoint script is the recommended approach** because it automatically sets up the correct environment without requiring you to know which environment variables need to be activated. It handles all the complexity for you.
 
 **Why the entrypoint script is important:**
 
-The entrypoint script is a **reliable solution for PATH issues** in Singularity containers pulled from Docker images. Unlike isolation flags which prevent host interference, the entrypoint script **actively sets up the correct environment** inside the container, ensuring all tools and Python packages are accessible regardless of how Singularity handles PATH.
+The entrypoint script is a **reliable solution for PATH issues** in Singularity containers pulled from Docker images. It **actively sets up the correct environment** inside the container, ensuring all tools and Python packages are accessible regardless of how Singularity handles PATH.
 
 **Key benefits:**
+- **No need to know environment variables** - The script handles everything automatically
 - **Explicitly activates conda environment** - Ensures conda's bin directory is in PATH
 - **Sets PATH correctly** - Guarantees `/usr/local/bin` and `/opt/conda/bin` are accessible
 - **Sets PYTHONPATH** - Ensures Python can find ChiRA scripts and packages
-- **Works even when isolation flags don't** - Provides a fallback when `--no-home --cleanenv` isn't sufficient
 - **Solves persistent PATH problems** - Many users report this completely resolves long-standing PATH issues
 
-The ChiRA Docker image includes an entrypoint script that sets up the conda environment. You can call it explicitly:
+**How to use it:**
+
+The ChiRA Docker image includes an entrypoint script that sets up the conda environment. The script is automatically executed by Singularity, so you typically don't need to call it explicitly:
 
 ```bash
-# Call the entrypoint script - this ensures proper environment setup
+# Simple usage - entrypoint script runs automatically
+singularity exec chira_latest.sif \
+  chira_collapse.py --help
+```
+
+If you need to explicitly call the entrypoint script (e.g., for troubleshooting or when automatic execution doesn't work):
+
+```bash
+# Explicitly call the entrypoint script
 singularity exec chira_latest.sif \
   /usr/local/bin/_entrypoint.sh \
   chira_collapse.py --help
 ```
-Internally, ENTRYPOINT instruction (%runscript) run this script automatically when Docker (Singularity) container starts. So it is not necessary to include it in the command.
-
-```bash
-# Call the entrypoint script - this ensures proper environment setup
-singularity exec chira_latest.sif \
-  chira_collapse.py --help
-```
-
 
 **Entrypoint script contents:**
 
@@ -412,15 +395,8 @@ fi
 - Sets PYTHONPATH to `/app`
 - Executes your command
 
-**When to use entrypoint script:**
-- **When you have persistent PATH issues** - This is often the definitive solution
-- When isolation flags don't work in your setup
-- When you want to ensure conda environment is explicitly activated
-- When tools or Python packages are not found despite using isolation flags
-- Can be combined with isolation flags for maximum reliability
-
 **Why it works:**
-The entrypoint script **proactively sets up the environment** rather than just preventing host interference. It explicitly:
+The entrypoint script **proactively sets up the environment** by explicitly:
 1. Sources conda's activation script
 2. Activates the base conda environment
 3. Sets PATH to include all necessary directories
@@ -428,7 +404,38 @@ The entrypoint script **proactively sets up the environment** rather than just p
 
 This approach ensures the environment is correct **regardless of how Singularity initializes PATH**, making it a robust solution for PATH-related problems.
 
-**Combining both approaches:**
+---
+
+## Environment Isolation
+
+### Understanding Isolation Flags
+
+Isolation flags control how the host environment interacts with the container. These are useful when you need to prevent host environment variables or filesystem mounts from interfering with the container.
+
+| Flag | What It Does | Use When |
+|------|--------------|----------|
+| `--no-home` | Prevents mounting host `$HOME` | Host has conflicting software in `~/.local/` or `~/.conda/` |
+| `--cleanenv` | Prevents host environment variables from entering container | Host `PATH`, `PYTHONPATH`, or `LD_LIBRARY_PATH` conflicts |
+| `--containall` | Maximum isolation (no `$HOME`, `/tmp`, or current directory mounts) | Need complete filesystem isolation |
+
+**For most cases, use `--no-home --cleanenv`:**
+
+```bash
+singularity exec \
+  --no-home \      # Prevent host $HOME from shadowing container tools
+  --cleanenv \     # Prevent host PATH/PYTHONPATH from interfering
+  chira_latest.sif \
+  chira_collapse.py [options]
+```
+
+**Why this works:**
+- `--no-home`: Prevents host `$HOME` (which may contain `~/.local/bin/python`, `~/.conda/`, etc.) from shadowing container tools
+- `--cleanenv`: Prevents host environment variables from interfering with container's PATH and PYTHONPATH
+
+**Combining with entrypoint script:**
+
+You can combine the entrypoint script with isolation flags for maximum reliability:
+
 ```bash
 singularity exec \
   --no-home --cleanenv \
@@ -441,13 +448,14 @@ singularity exec \
 
 | Situation | Recommended Solution |
 |-----------|---------------------|
-| Host has Python/conda in `$HOME` | Use `--no-home` |
-| Host `PATH`/`PYTHONPATH` conflicts | Use `--cleanenv` |
-| Both issues | Use `--no-home --cleanenv` |
+| **Default / Don't know what to use** | **Use entrypoint script (automatic, handles everything)** |
 | **Persistent PATH issues / Tools not found** | **Use entrypoint script (often definitive solution)** |
-| Isolation flags don't work | Use entrypoint script |
-| Need maximum isolation | Use `--containall --cleanenv` |
-| Want maximum reliability | Combine both approaches |
+| **Want simplest solution** | **Use entrypoint script (no need to know environment variables)** |
+| Host has Python/conda in `$HOME` | Use `--no-home` (or combine with entrypoint script) |
+| Host `PATH`/`PYTHONPATH` conflicts | Use `--cleanenv` (or combine with entrypoint script) |
+| Both issues | Use `--no-home --cleanenv` (or combine with entrypoint script) |
+| Need maximum isolation | Use `--containall --cleanenv` (or combine with entrypoint script) |
+| Want maximum reliability | Combine both approaches (entrypoint script + isolation flags) |
 
 ---
 
@@ -457,34 +465,45 @@ singularity exec \
 
 **Symptoms:** Commands like `python`, `bwa`, or `samtools` are not found even though they're installed in the container.
 
-**Solutions:**
+**Solutions (in order of recommendation):**
 
-1. **Use entrypoint script (Recommended - often definitive solution):**
+1. **Use entrypoint script (Recommended - primary solution):**
    ```bash
    # The entrypoint script explicitly sets up PATH and conda environment
-   # This is often the most reliable solution for PATH issues
+   # This is the recommended approach - no need to know which environment variables to set
+   # Usually works automatically:
+   singularity exec chira_latest.sif command
+   
+   # Or explicitly call it if needed:
    singularity exec chira_latest.sif /usr/local/bin/_entrypoint.sh command
    ```
 
-2. **Use isolation flags:**
+2. **Use isolation flags (Alternative approach):**
    ```bash
+   # Use isolation flags if you prefer or need additional isolation
    singularity exec --no-home --cleanenv chira_latest.sif command
    ```
 
-3. **Check PATH inside container:**
+3. **Combine both approaches (Maximum reliability):**
+   ```bash
+   # Combine entrypoint script with isolation flags for maximum reliability
+   singularity exec --no-home --cleanenv chira_latest.sif /usr/local/bin/_entrypoint.sh command
+   ```
+
+4. **Check PATH inside container:**
    ```bash
    singularity shell chira_latest.sif
    # Inside: echo $PATH
    # Inside: ls /usr/local/bin | grep -E "(python|bwa|samtools)"
    ```
 
-4. **Override PATH:**
+5. **Override PATH:**
    ```bash
    export SINGULARITYENV_PATH="/usr/local/bin:/opt/conda/bin:$PATH"
    singularity exec chira_latest.sif command
    ```
 
-5. **Use absolute paths:**
+6. **Use absolute paths:**
    ```bash
    singularity exec chira_latest.sif /usr/local/bin/python /usr/local/bin/chira_collapse.py --help
    ```
@@ -565,31 +584,48 @@ singularity exec \
 
 If something doesn't work, systematically check:
 
-1. **PATH inside container:**
+1. **PATH inside container (entrypoint script sets this automatically):**
    ```bash
-   singularity exec --no-home --cleanenv chira_latest.sif echo $PATH
+   # With entrypoint script (recommended)
+   singularity exec chira_latest.sif /usr/local/bin/_entrypoint.sh bash -c 'echo $PATH'
+   
+   # Or check without entrypoint script
+   singularity exec chira_latest.sif echo $PATH
    ```
 
-2. **Tools accessible:**
+2. **Tools accessible (entrypoint script ensures PATH is correct):**
    ```bash
-   singularity exec --no-home --cleanenv chira_latest.sif which python bwa samtools
+   # With entrypoint script (recommended)
+   singularity exec chira_latest.sif which python bwa samtools
+   
+   # Or explicitly call entrypoint script
+   singularity exec chira_latest.sif /usr/local/bin/_entrypoint.sh which python bwa samtools
    ```
 
-3. **Python packages:**
+3. **Python packages (entrypoint script sets PYTHONPATH):**
    ```bash
-   singularity exec --no-home --cleanenv chira_latest.sif \
+   # With entrypoint script (recommended)
+   singularity exec chira_latest.sif \
+     python -c "import Bio; import BCBio; import pysam; print('OK')"
+   
+   # Or explicitly call entrypoint script
+   singularity exec chira_latest.sif /usr/local/bin/_entrypoint.sh \
      python -c "import Bio; import BCBio; import pysam; print('OK')"
    ```
 
 4. **Mounted directories:**
    ```bash
-   singularity shell --no-home --cleanenv -B /data:/app/data chira_latest.sif
+   singularity shell -B /data:/app/data chira_latest.sif
    # Inside: ls /app/data
    ```
 
-5. **Environment variables:**
+5. **Environment variables (entrypoint script sets these):**
    ```bash
-   singularity exec --no-home --cleanenv chira_latest.sif env | grep -E "(PATH|PYTHONPATH)"
+   # With entrypoint script (recommended)
+   singularity exec chira_latest.sif env | grep -E "(PATH|PYTHONPATH)"
+   
+   # Or explicitly call entrypoint script
+   singularity exec chira_latest.sif /usr/local/bin/_entrypoint.sh env | grep -E "(PATH|PYTHONPATH)"
    ```
 
 ---
@@ -598,18 +634,16 @@ If something doesn't work, systematically check:
 
 ### Command Templates
 
-**Template 1: Isolation flags (Recommended):**
+**Template 1: Entrypoint script (Recommended - automatic environment setup):**
 ```bash
 singularity exec \
-  --no-home \
-  --cleanenv \
   -B /host/data:/app/data:ro \
   -B /host/output:/app/output \
   chira_latest.sif \
   chira_collapse.py [options]
 ```
 
-**Template 2: Entrypoint script:**
+**Template 2: Isolation flags (Alternative - when you need host isolation):**
 ```bash
 singularity exec \
   -B /host/data:/app/data:ro \
@@ -619,7 +653,7 @@ singularity exec \
   chira_collapse.py [options]
 ```
 
-**Template 3: Maximum reliability (both approaches):**
+**Template 3: Maximum reliability (entrypoint script + isolation flags):**
 ```bash
 singularity exec \
   --no-home \
@@ -707,4 +741,4 @@ singularity exec --network bridge chira_latest.sif command  # Bridge network
 
 ---
 
-**Last Updated:** 2026
+**Last Updated:** January 2026
