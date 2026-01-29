@@ -581,8 +581,11 @@ def merge_files(inprefix, outfile, header, r):
               " | sort -u | sed '1s/^/" + header + "\\n/' > " +
               outfile)
 
-    #for i in range(r):
-    #    os.remove(inprefix + "." + str(i))
+    # Clean up intermediate per-process files after merging
+    for i in range(r):
+        temp_file = inprefix + "." + str(i)
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
 
 
 def hybridization_positions(dotbracket1, dotbracket2):

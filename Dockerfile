@@ -36,40 +36,72 @@ RUN apt-get update && \
         intarna \
         && \
     micromamba clean -afy && \
+    # Create symlinks for ALL conda binaries in /usr/local/bin so they're always in PATH
+    # This ensures tools are available even if PATH is overridden in Singularity
+    # This includes Python, which needs to be accessible for the scripts to work
+    # Using symlinks (not copies) to save space and avoid duplication
+    for bin in /opt/conda/bin/*; do \
+        if [ -f "$bin" ] && [ -x "$bin" ]; then \
+            ln -sf "$bin" /usr/local/bin/$(basename "$bin") 2>/dev/null || true; \
+        fi; \
+    done && \
     # Fix permissions for conda directory
     chown -R chira:chira /opt/conda
 
 # Set environment variables for both Docker and Singularity
+# Note: ENV variables are preserved when converting Docker to Singularity
 ENV CONDA_PREFIX=/opt/conda
-ENV PATH=/app:/opt/conda/bin:${PATH}
+# Include /opt/conda/bin in PATH so Python and Python packages are accessible
+# /usr/local/bin has symlinks to tools, but Python needs to find its packages
+ENV PATH=/usr/local/bin:/opt/conda/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
 ENV PYTHONPATH=/app
 ENV HOME=/home/chira
 ENV TMPDIR=/tmp
 
-# Create Singularity environment script (automatically sourced by Singularity)
-# This ensures environment variables are set correctly when converting to Singularity
-# Note: Singularity automatically sources scripts in /.singularity.d/env/ directory
-RUN mkdir -p /.singularity.d/env && \
-    echo '#!/bin/bash' > /.singularity.d/env/91-environment.sh && \
-    echo '# ChiRA environment setup for Singularity' >> /.singularity.d/env/91-environment.sh && \
-    echo 'export CONDA_PREFIX=/opt/conda' >> /.singularity.d/env/91-environment.sh && \
-    echo 'export PATH=/app:/opt/conda/bin:$PATH' >> /.singularity.d/env/91-environment.sh && \
-    echo 'export PYTHONPATH=/app' >> /.singularity.d/env/91-environment.sh && \
-    echo 'export HOME=/home/chira' >> /.singularity.d/env/91-environment.sh && \
-    echo 'export TMPDIR=/tmp' >> /.singularity.d/env/91-environment.sh && \
-    chmod +x /.singularity.d/env/91-environment.sh
-
 # Copy the ChiRA codebase and set permissions
 COPY --chown=chira:chira *.py LICENSE ./
 
-# Make Python scripts executable
-RUN chmod +x *.py && \
+# Generate entrypoint script inline (makes Dockerfile self-contained)
+RUN cat > /usr/local/bin/docker-entrypoint.sh << 'EOF'
+#!/bin/bash
+# Docker entrypoint script for ChiRA
+# Sets up conda environment and ensures PATH is correct
+# This script is automatically executed in Docker and can be called manually in Singularity
+
+# Activate conda base environment
+# This ensures conda's bin directory is in PATH
+if [ -f /opt/conda/etc/profile.d/conda.sh ]; then
+    source /opt/conda/etc/profile.d/conda.sh
+    conda activate base
+fi
+
+# Ensure /usr/local/bin is in PATH (where we symlinked all binaries)
+export PATH="/usr/local/bin:/opt/conda/bin:${PATH}"
+
+# Set PYTHONPATH for ChiRA scripts
+export PYTHONPATH="/app:${PYTHONPATH}"
+
+# If arguments are provided, execute them; otherwise, start bash
+if [ $# -eq 0 ]; then
+    exec /bin/bash
+else
+    exec "$@"
+fi
+EOF
+
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh && \
+    # Also create a symlink with a shorter name for easier Singularity usage
+    ln -sf /usr/local/bin/docker-entrypoint.sh /usr/local/bin/_entrypoint.sh && \
+    # Make Python scripts executable and copy to /usr/local/bin so they're always in PATH
+    chmod +x *.py && \
+    cp *.py /usr/local/bin/ && \
     chown -R chira:chira /app
 
 # Switch to non-root user
 USER chira
 
-
-# Default command
-CMD ["/bin/bash"]
+# Set entrypoint - this will be executed in Docker automatically
+# In Singularity, users can call it manually: singularity exec image.sif /usr/local/bin/_entrypoint.sh command
+# The entrypoint script handles default command (bash) when no arguments are provided
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
