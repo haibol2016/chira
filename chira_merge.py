@@ -7,6 +7,18 @@ from collections import defaultdict
 import datetime
 import itertools
 import re
+import warnings
+# Suppress Biopython deprecation warning from BCBio.GFF using UnknownSeq
+# The bcbiogff package (BCBio) internally uses UnknownSeq(length) which is deprecated
+# in newer Biopython versions in favor of Seq(None, length)
+# Upgrading Biopython alone won't fix this - bcbiogff needs to be updated to use the new API
+# This warning suppression is a workaround until bcbiogff is updated
+try:
+    from Bio import BiopythonDeprecationWarning
+    warnings.filterwarnings("ignore", message=".*UnknownSeq.*deprecated.*", category=BiopythonDeprecationWarning)
+except ImportError:
+    # Fallback for older Biopython versions that don't have BiopythonDeprecationWarning
+    warnings.filterwarnings("ignore", message=".*UnknownSeq.*deprecated.*", category=DeprecationWarning)
 from BCBio import GFF
 
 
@@ -18,7 +30,7 @@ def filter_alignments(prev_read_alignments, chimeric_overlap, refids1, refids2, 
     alignments1 = defaultdict(list)
     alignments2 = defaultdict(list)
     alignments_pairs = []
-    # choose first alignment if there are multiple alignmnets on same reference postion
+    # choose first alignment if there are multiple alignments on same reference position
     # if split reference
     if split_reference:
         # split the alignments based on their references
@@ -80,7 +92,7 @@ def filter_alignments(prev_read_alignments, chimeric_overlap, refids1, refids2, 
                     continue
                 prev_ref = None
                 for refpos, bedline in prev_read_alignments[readpos].items():
-                    # for each read position and reference consider 1st alignmnet only
+                    # for each read position and reference consider 1st alignment only
                     if refpos.split(',')[0] != prev_ref:
                         filtered_alignments[readpos][refpos] = bedline
                     prev_ref = refpos.split(',')[0]
@@ -420,7 +432,8 @@ def parse_annotations(gtf, outdir):
     exon_len = 0
     prev_transcript_id = None
 
-    limit_info = dict(gff_type=["exon", "UTR", "CDS", "miRNA", "tRNA"])
+    # Support both generic "UTR" and Ensembl-specific "five_prime_utr"/"three_prime_utr"
+    limit_info = dict(gff_type=["exon", "UTR", "five_prime_utr", "three_prime_utr", "CDS", "miRNA", "tRNA"])
 
     d_attributes = defaultdict(list)
     d_attributes['tid'] = ['transcript_id', 'Name']
@@ -593,7 +606,7 @@ if __name__ == "__main__":
 
     parser.add_argument('-lt', '--length_threshold', action='store', type=chira_utilities.score_float, default=0.9, metavar='',
                         dest='length_threshold',
-                        help='Minimum length of the alignments to consider as a fraction of longest alignmnet. [0.8-1.0]')
+                        help='Minimum length of the alignments to consider as a fraction of longest alignment. [0.8-1.0]')
 
     parser.add_argument('-d', '--distance', action='store', type=int, default=30, metavar='',
                         dest='distance',
@@ -616,7 +629,7 @@ if __name__ == "__main__":
                         help='Maximum number of bases allowed between the chimeric segments of a read')
 
     parser.add_argument('-f1', '--ref_fasta1', action='store', dest='ref_fasta1', required=False,
-                        metavar='', help='First prioroty fasta file')
+                        metavar='', help='First priority fasta file')
 
     parser.add_argument('-f2', '--ref_fasta2', action='store', dest='ref_fasta2', required=False,
                         metavar='', help='second priority fasta file')
@@ -639,7 +652,7 @@ if __name__ == "__main__":
     if args.gtf:
         print('Annotation file                      : ' + args.gtf)
     if args.block_based:
-        print('Merge method                         : blockbuser based')
+        print('Merge method                         : blockbuster based')
         print('Blockbuster distance                 : ' + str(args.distance))
         print('Blockbuster minClusterHeight         : ' + str(args.min_cluster_height))
         print('Blockbuster minBlockHeight           : ' + str(args.min_block_height))
@@ -682,10 +695,10 @@ if __name__ == "__main__":
         os.system(" ".join(["mv", os.path.join(args.outdir, "segments.temp.bed"),
                             os.path.join(args.outdir, "segments.bed")]))
     if args.block_based:
-        chira_utilities.print_w_time("START: blockcuster based merging")
+        chira_utilities.print_w_time("START: blockbuster based merging")
         merge_loci_blockbuster(args.outdir, args.distance, args.min_cluster_height, args.min_block_height,
                                args.scale, args.alignment_overlap_fraction)
-        chira_utilities.print_w_time("END: blockcuster based merging")
+        chira_utilities.print_w_time("END: blockbuster based merging")
     else:
         chira_utilities.print_w_time("START: overlap based merging")
         merge_loci_overlap(args.outdir, args.alignment_overlap_fraction, args.min_locus_size)

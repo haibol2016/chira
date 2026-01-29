@@ -142,6 +142,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added zero-length match checks in `write_segments()` to prevent division by zero
   - Removed unnecessary caching optimizations that didn't provide performance benefit
   - Optimized set operations in `transcript_to_genomic_pos()` for deduplication
+  - Enhanced UTR parsing to support Ensembl-specific UTR types (`five_prime_utr`, `three_prime_utr`)
+    - Updated `limit_info` to include all UTR types for better Ensembl GTF compatibility
+  - Added Biopython deprecation warning suppression (lines 10-21)
+    - Suppresses `BiopythonDeprecationWarning` related to `UnknownSeq(length)` from `bcbiogff` package
+    - Includes fallback for older Biopython versions that don't have `BiopythonDeprecationWarning`
 
 - **chira_extract.py**:
   - Updated to use `chira_utilities.get_bedtools_command('getfasta')` for BEDTools compatibility (line 803)
@@ -151,11 +156,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - `write_interaction_summary()` (line 540)
   - Updated all file paths to use sample name prefix (lines 322-323, 372, 542, 776-778, 894)
   - Added `--sample_name` argument to argument parser (line 707)
+  - Improved output file headers with more descriptive column names (lines 912-945, 947-961, 678-689)
+    - Chimeras file: Updated all 34 column names (e.g., `tagid` → `read_id`, `txid1` → `transcript_id_1`, `mfe` → `hybridization_mfe_kcal_mol`)
+    - Singletons file: Updated all 14 column names (e.g., `tagid` → `read_id`, `txid` → `transcript_id`)
+    - Interactions file: Updated all 24 column names (e.g., `read_count` → `supporting_read_count`, `locus1_chr` → `locus_1_chromosome`)
 
 - **README.md**:
   - Added version information and brief summary of improvements
   - Added note about modified version and GPL compliance
   - Streamlined to focus on user-facing documentation, with detailed changes in CHANGELOG.md
+  - Updated to reflect new header names in output files (chimeras, singletons, interactions)
+  - Fixed typo: `--summerize` → `--summarize` in parameter documentation (lines 577, 651)
+  - Updated all column name references to match new descriptive headers
 
 - **DEPENDENCIES.md**:
   - Updated to reflect that `chira_collapse.py` no longer uses Biopython
@@ -168,14 +180,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **chira_map.py**:
   - Fixed bug where first iteration would write empty string to unmapped FASTA file (line 67-70)
     - Added check: `if prev_readid is not None` before writing previous read
-  - Fixed typo: "STRAT" → "START" in print statements (line 442)
-    - Note: Some "STRAT" typos remain on lines 465, 471, 475, 480 (should be fixed)
+  - Fixed typos: "STRAT" → "START" in all print statements (lines 416, 422, 426, 431)
+  - Fixed typo: "Funtion" → "Function" in docstring (line 12)
+  - Fixed typo: "alignmnet" → "alignment" in docstring (line 15)
+  - Fixed typos: "prioroty" → "priority" in argument help text (lines 249, 255)
+  - Fixed inefficiency in `clan_to_bed()` function (line 222)
+    - Changed to use pre-split `location_list` instead of re-splitting `mapped_locations`
 
 - **chira_merge.py**:
   - Added zero-length match checks in `write_segments()` to prevent division by zero (lines 134-138, 153-156)
     - Checks `first_match_length` and `current_match_length` before division
     - Checks `last_match_length` and `current_match_length` before division
   - Removed unnecessary caching that didn't improve performance
+  - Fixed typos: "alignmnets" → "alignments" (line 33), "alignmnet" → "alignment" (lines 95, 609)
+  - Fixed typo: "postion" → "position" (line 33)
+  - Fixed typo: "prioroty" → "priority" (line 632)
+  - Fixed typos: "blockbuser" → "blockbuster" (line 655), "blockcuster" → "blockbuster" (lines 698, 701)
+  - Enhanced UTR parsing to support Ensembl-specific UTR types (lines 436, 459-484)
+    - Added support for `five_prime_utr` and `three_prime_utr` feature types in addition to generic `UTR`
+    - Updated `limit_info` to include all UTR types for better Ensembl GTF compatibility
 
 - **chira_extract.py**:
   - Fixed undefined variables `d_reflen1`/`d_reflen2` in `extract_and_write()` (lines 249-257)
@@ -190,6 +213,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - Refactored loops for clarity using `range(len(...))`
   - Fixed potential string slicing issue in `hybridize_and_write()` (lines 394-398)
     - Added length check before slicing `record.id[:-3]`
+  - Fixed typos: "prioroty" → "priority" (line 763), "summerize" → "summarize" (lines 771, 772, 796, 965)
+  - Fixed typo: "Outpur direcoty" → "Output directory" (line 782)
+  - Enhanced UTR parsing to support Ensembl-specific UTR types (lines 445, 475-484, 53-65, 85-95)
+    - Added support for `five_prime_utr` and `three_prime_utr` feature types in addition to generic `UTR`
+    - Updated `limit_info` to include all UTR types for better Ensembl GTF compatibility
+    - Modified `guess_region()` to use stored `utr_type` for more specific region assignment (5_prime_UTR vs 3_prime_UTR)
+    - Position-based UTR determination now only applies to generic 'UTR' types
+  - Improved code maintainability with constants for magic indices (lines 19-26, 29)
+    - Defined constants: `CHIMERA_IDX_LOCUS1`, `CHIMERA_IDX_LOCUS2`, `CHIMERA_IDX_SEQUENCES`, etc.
+    - Defined constant: `MIRNA_REGION_TYPES` for miRNA region type checking
+  - Refactored `mirna_position` handling (lines 295-309, 430-433)
+    - Pre-populated `chimera` list with "NA" values for hybridization fields
+    - Eliminated need for `pop()` and `append()` operations later in code
+    - Removed unnecessary fallback code after refactoring
 
 - **chira_utilities.py**:
   - Fixed `median()` function bug where input wasn't sorted (lines 28-35)
@@ -202,6 +239,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **chira_quantify.py**:
   - Fixed CRL iteration range to properly include index 0 in reverse traversal (line 55)
     - Changed from `range(len(d_crl_reads) - 1, 0, -1)` to `range(len(d_crl_reads) - 1, -1, -1)`
+  - Fixed typos: "2st" → "2nd" in print statements (lines 111, 128)
 
 - **BEDTools compatibility**:
   - Fixed command compatibility issues across different BEDTools versions

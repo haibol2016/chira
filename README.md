@@ -574,38 +574,38 @@ chira_quantify.py -b segments.bed -m loci.txt -o output_dir -cs 0.7 -ls 10
 - `-sbp, --seed_bp`: Number of base pairs in seed region (default: 5)
 - `-acc, --accessibility`: Compute accessibility (`C` or `N`, default: `N`)
 - `-p, --processes`: Number of parallel processes (default: 1)
-- `-s, --summerize`: Summarize interactions at locus level
+- `-s, --summarize`: Summarize interactions at locus level
 
 **Outputs:**
 
 **1. `{sample_name}.chimeras.txt`** - Tabular file with chimeric read information in an extended BED format
 
-Header columns (31 total):
-- `tagid`: Read identifier (from collapsed FASTQ)
-- `txid1`, `txid2`: Transcript IDs for locus 1 and locus 2
-- `geneid1`, `geneid2`: Gene IDs for locus 1 and locus 2
-- `symbol1`, `symbol2`: Gene symbols for locus 1 and locus 2
-- `region1`, `region2`: Annotation regions (e.g., `3p_mature_mir`, `5p_mature_mir`, `mature_mir` for miRNA; gene/exon types for targets)
-- `tx_pos_start1`, `tx_pos_end1`, `tx_pos_strand1`: Transcriptomic coordinates for locus 1
-- `length1`: Alignment length for locus 1
-- `tx_pos_start2`, `tx_pos_end2`, `tx_pos_strand2`: Transcriptomic coordinates for locus 2
-- `length2`: Alignment length for locus 2
-- `read_info`: Read alignment information (format: `arm1_start,arm1_end,arm2_start,arm2_end,read_length`)
+Header columns (34 total):
+- `read_id`: Read identifier (from collapsed FASTQ)
+- `transcript_id_1`, `transcript_id_2`: Transcript IDs for locus 1 and locus 2
+- `gene_id_1`, `gene_id_2`: Gene IDs for locus 1 and locus 2
+- `gene_symbol_1`, `gene_symbol_2`: Gene symbols for locus 1 and locus 2
+- `annotation_region_1`, `annotation_region_2`: Annotation regions (e.g., `3p_mature_mir`, `5p_mature_mir`, `mature_mir` for miRNA; gene/exon types for targets)
+- `transcript_start_1`, `transcript_end_1`, `transcript_strand_1`: Transcriptomic coordinates for locus 1
+- `transcript_length_1`: Alignment length for locus 1
+- `transcript_start_2`, `transcript_end_2`, `transcript_strand_2`: Transcriptomic coordinates for locus 2
+- `transcript_length_2`: Alignment length for locus 2
+- `read_alignment_info`: Read alignment information (format: `arm1_start,arm1_end,arm2_start,arm2_end,read_length`)
   - Contains positions of both alignment arms within the read sequence
   - **Use to determine actual read orientation**: Compare `arm1_start` vs `arm2_start`
     - If `arm1_start < arm2_start`: Read is 5' locus1 → locus2 3'
     - If `arm2_start < arm1_start`: Read is 5' locus2 → locus1 3' (reoriented in output for split reference)
-- `genomic_pos1`, `genomic_pos2`: Genomic coordinates (if GTF provided)
-- `locus1`, `locus2`: Locus identifiers in format `chr:start:end:strand`
-- `groupid1`, `groupid2`: CRL group IDs
-- `tpm1`, `tpm2`: TPM (Transcripts Per Million) values for each locus
-- `score1`, `score2`: Alignment scores for each locus
-- `score`: Combined score (score1 × score2)
-- `sequences`: Hybridized sequences (format: `sequence1&sequence2`, or `NA` if not hybridized)
-- `hybrid`: Dot-bracket notation for RNA-RNA hybridization structure (or `NA`)
-- `hybrid_pos`: Hybridization position information (or `NA`)
-- `mfe`: Minimum free energy of hybridization in kcal/mol (or `NA`)
-- `mirna_position`: Indicates whether miRNA is at the 5' or 3' end of the read
+- `genomic_coordinates_1`, `genomic_coordinates_2`: Genomic coordinates (if GTF provided)
+- `locus_id_1`, `locus_id_2`: Locus identifiers in format `chr:start:end:strand`
+- `crl_group_id_1`, `crl_group_id_2`: CRL group IDs
+- `tpm_1`, `tpm_2`: TPM (Transcripts Per Million) values for each locus
+- `alignment_score_1`, `alignment_score_2`: Alignment scores for each locus
+- `combined_alignment_score`: Combined score (score1 × score2)
+- `hybridized_sequences`: Hybridized sequences (format: `sequence1&sequence2`, or `NA` if not hybridized)
+- `hybridization_structure`: Dot-bracket notation for RNA-RNA hybridization structure (or `NA`)
+- `hybridization_positions`: Hybridization position information (or `NA`)
+- `hybridization_mfe_kcal_mol`: Minimum free energy of hybridization in kcal/mol (or `NA`)
+- `mirna_read_position`: Indicates whether miRNA is at the 5' or 3' end of the read
   - `miRNA_first`: miRNA is at the 5' end (5' miRNA → target 3')
   - `miRNA_last`: miRNA is at the 3' end (5' target → miRNA 3')
   - `NA`: Neither locus is annotated as miRNA (rare, may occur in non-split reference scenarios)
@@ -634,40 +634,40 @@ In the **interactions file**, both orientations are merged into a single entry t
 **2. `{sample_name}.singletons.txt`** - Tabular file with singleton reads (non-chimeric alignments)
 
 Header columns (14 total):
-- `tagid`: Read identifier
-- `txid`: Transcript ID
-- `geneid`: Gene ID
-- `symbol`: Gene symbol
-- `region`: Annotation region type
-- `tx_pos_start`, `tx_pos_end`, `tx_pos_strand`: Transcriptomic coordinates
-- `length`: Alignment length
-- `read_info`: Read alignment information
-- `genomic_pos`: Genomic coordinates (if GTF provided)
-- `locus`: Locus identifier in format `chr:start:end:strand`
-- `groupid`: CRL group ID
+- `read_id`: Read identifier
+- `transcript_id`: Transcript ID
+- `gene_id`: Gene ID
+- `gene_symbol`: Gene symbol
+- `annotation_region`: Annotation region type
+- `transcript_start`, `transcript_end`, `transcript_strand`: Transcriptomic coordinates
+- `transcript_length`: Alignment length
+- `read_alignment_info`: Read alignment information
+- `genomic_coordinates`: Genomic coordinates (if GTF provided)
+- `locus_id`: Locus identifier in format `chr:start:end:strand`
+- `crl_group_id`: CRL group ID
 - `tpm`: TPM value
-- `score`: Alignment score
+- `alignment_score`: Alignment score
 
-**3. `{sample_name}.interactions.txt`** - Tabular file with detected interactions (if `--summerize` used)
+**3. `{sample_name}.interactions.txt`** - Tabular file with detected interactions (if `--summarize` used)
 
 Header columns (24 total):
-- `read_count`: Number of reads supporting this interaction
-- `locus1_chr`, `locus1_start`, `locus1_end`, `locus1_strand`: Genomic coordinates for locus 1
-- `locus2_chr`, `locus2_start`, `locus2_end`, `locus2_strand`: Genomic coordinates for locus 2
-- `sequence1`, `sequence2`: Sequences from each locus (or `NA` if not hybridized)
-- `dotbracket`: RNA-RNA hybridization structure in dot-bracket notation (format: `structure1&structure2`, or `NA`)
-- `mfe`: Minimum free energy of hybridization in kcal/mol (or `NA`)
-- `hybridized_sequences`: Hybridized sequence segments (format: `seq1\tseq2`, or `NA\tNA`)
-- `hybrid_start_pos`: Start positions of hybridization within sequences (format: `pos1&pos2`, or `NA`)
-- `hybridization_pos`: Genomic coordinates of hybridization region (format: `chr1:start1:end1:strand1\tchr2:start2:end2:strand2`, or `NA`)
-- `tpm1`, `tpm2`: TPM values for each locus
-- `tpm`: Combined TPM (tpm1 + tpm2)
-- `score1`, `score2`: Alignment scores for each locus
-- `score`: Combined score (score1 × score2)
-- `region1`, `region2`: Annotation regions (semicolon-separated if multiple; use to identify miRNA vs target)
-- `ref1`, `ref2`: Reference sequence IDs (semicolon-separated if multiple)
+- `supporting_read_count`: Number of reads supporting this interaction
+- `locus_1_chromosome`, `locus_1_start`, `locus_1_end`, `locus_1_strand`: Genomic coordinates for locus 1
+- `locus_2_chromosome`, `locus_2_start`, `locus_2_end`, `locus_2_strand`: Genomic coordinates for locus 2
+- `locus_1_sequence`, `locus_2_sequence`: Sequences from each locus (or `NA` if not hybridized)
+- `hybridization_structure_dotbracket`: RNA-RNA hybridization structure in dot-bracket notation (format: `structure1&structure2`, or `NA`)
+- `hybridization_mfe_kcal_mol`: Minimum free energy of hybridization in kcal/mol (or `NA`)
+- `hybridized_sequence_segments`: Hybridized sequence segments (format: `seq1\tseq2`, or `NA\tNA`)
+- `hybridization_start_positions`: Start positions of hybridization within sequences (format: `pos1&pos2`, or `NA`)
+- `hybridization_genomic_coordinates`: Genomic coordinates of hybridization region (format: `chr1:start1:end1:strand1\tchr2:start2:end2:strand2`, or `NA`)
+- `tpm_locus_1`, `tpm_locus_2`: TPM values for each locus
+- `tpm_combined`: Combined TPM (tpm1 + tpm2)
+- `alignment_score_locus_1`, `alignment_score_locus_2`: Alignment scores for each locus
+- `combined_alignment_score`: Combined score (score1 × score2)
+- `annotation_region_locus_1`, `annotation_region_locus_2`: Annotation regions (semicolon-separated if multiple; use to identify miRNA vs target)
+- `reference_transcript_id_1`, `reference_transcript_id_2`: Reference sequence IDs (semicolon-separated if multiple)
 
-**Note:** The interactions file includes comment lines explaining how to identify miRNA vs target loci. Check the `region1` and `region2` fields - miRNA annotations typically include: `miRNA`, `3p_mature_mir`, `5p_mature_mir`, `mature_mir`.
+**Note:** The interactions file includes comment lines explaining how to identify miRNA vs target loci. Check the `annotation_region_locus_1` and `annotation_region_locus_2` fields - miRNA annotations typically include: `miRNA`, `3p_mature_mir`, `5p_mature_mir`, `mature_mir`.
 
 **Usage Example:**
 ```bash
@@ -675,7 +675,7 @@ chira_extract.py -l loci.txt -o output_dir -f1 ref1.fasta -n sample1 \
   -g annotation.gtf -r -s -tc 0.1 -sc 0.5
 ```
 
-**Note:** The interactions file includes comments explaining how to identify miRNA vs target loci based on the `region1` and `region2` fields. miRNA annotations typically include: `miRNA`, `3p_mature_mir`, `5p_mature_mir`, `mature_mir`.
+**Note:** The interactions file includes comments explaining how to identify miRNA vs target loci based on the `annotation_region_locus_1` and `annotation_region_locus_2` fields. miRNA annotations typically include: `miRNA`, `3p_mature_mir`, `5p_mature_mir`, `mature_mir`.
 
 ---
 

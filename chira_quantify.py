@@ -108,7 +108,7 @@ def build_crls(build_crls_too, bed, merged_bed, crl_file, crl_share_cutoff, min_
                 d_highest_shares[locusid] = locus_share
 
     d_isolated_loci = {}  # loci that are separated from crl because of not enough overall share
-    chira_utilities.print_w_time("START: 2st iteration of CRLs")
+    chira_utilities.print_w_time("START: 2nd iteration of CRLs")
     # in this iteration each locus is checked again for crl share and only one best crl for locus kept
     # if there are multiple eqaully good crls for a locus, all of the crls are considered for that locus
     for crlid in list(d_crl_locus_reads.keys()):
@@ -125,7 +125,7 @@ def build_crls(build_crls_too, bed, merged_bed, crl_file, crl_share_cutoff, min_
                 del d_crl_locus_reads[crlid][locusid]
                 del d_locus_crl_share[locusid]
 
-    chira_utilities.print_w_time("END: 2st iteration of CRLs")
+    chira_utilities.print_w_time("END: 2nd iteration of CRLs")
     chira_utilities.print_w_time("START: creating CRLs with isolated loci")
     # every locus that is in isolated_loci makes its own crl
     crl_index = len(d_crl_locus_reads)

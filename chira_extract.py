@@ -16,6 +16,18 @@ import math
 d_gene_annotations = defaultdict(lambda: defaultdict(str))
 d_transcript_annotations = defaultdict(lambda: defaultdict())
 
+# Constants for chimera list indices
+CHIMERA_IDX_LOCUS1 = 20
+CHIMERA_IDX_LOCUS2 = 21
+CHIMERA_IDX_SEQUENCES = 29
+CHIMERA_IDX_HYBRID = 30
+CHIMERA_IDX_HYBRID_POS = 31
+CHIMERA_IDX_MFE = 32
+CHIMERA_IDX_MIRNA_POSITION = 33
+
+# miRNA region types
+MIRNA_REGION_TYPES = ["miRNA", "3p_mature_mir", "5p_mature_mir", "mature_mir"]
+
 
 def strandardize(strand):
     if strand == '-1':
@@ -37,12 +49,20 @@ def guess_region(transcriptid, read_pos):
             start = int(pos[1])
             end = int(pos[2])
             strand = strandardize(pos[3])
+            # UTR type is stored as 5th element (if available), otherwise defaults to 'UTR'
+            utr_type = pos[4] if len(pos) > 4 else 'UTR'
             if read_chr != chrom or read_strand != strand:
                 continue
 
             if chira_utilities.overlap([start, end], [int(read_start), int(read_end)]) > overlap_length:
                 overlap_length = chira_utilities.overlap([start, end], [int(read_start), int(read_end)])
-                region = 'UTR'
+                # Use specific UTR type if available, otherwise use generic 'UTR'
+                if utr_type == 'five_prime_utr':
+                    region = '5_prime_UTR'
+                elif utr_type == 'three_prime_utr':
+                    region = '3_prime_UTR'
+                else:
+                    region = 'UTR'
                 utr_start = start
                 utr_end = end
 
@@ -62,15 +82,17 @@ def guess_region(transcriptid, read_pos):
             if not last_cds_end or end > last_cds_end:
                 last_cds_end = end
 
-    # if region is still a UTR
-    if region == 'UTR' and utr_end <= first_cds_start:
-        region = '5_prime_UTR'
-        if strand == '-':
-            region = '3_prime_UTR'
-    elif region == 'UTR' and utr_start >= last_cds_end:
-        region = '3_prime_UTR'
-        if strand == '-':
+    # if region is still a generic UTR (not already determined from feature type)
+    # determine 5' vs 3' based on position relative to CDS
+    if region == 'UTR' and first_cds_start is not None and last_cds_end is not None:
+        if utr_end <= first_cds_start:
             region = '5_prime_UTR'
+            if strand == '-':
+                region = '3_prime_UTR'
+        elif utr_start >= last_cds_end:
+            region = '3_prime_UTR'
+            if strand == '-':
+                region = '5_prime_UTR'
 
     # works for mirbase gff3
     if transcriptid in d_transcript_annotations['gid']:
@@ -258,26 +280,17 @@ def extract_and_write(readid, l_read_alignments, l_loci_bed, d_ref_lengths1, d_r
 
         # Determine if miRNA is first or last in the read
         # Check if region1 or region2 is miRNA
-        is_mirna1 = region1 in ["miRNA", "3p_mature_mir", "5p_mature_mir", "mature_mir"]
-        is_mirna2 = region2 in ["miRNA", "3p_mature_mir", "5p_mature_mir", "mature_mir"]
+        is_mirna1 = region1 in MIRNA_REGION_TYPES
+        is_mirna2 = region2 in MIRNA_REGION_TYPES
         
         # Determine read orientation based on arm positions
-        if arm1_start < arm2_start:
-            # arm1 (locus1) is at 5' end
-            if is_mirna1:
-                mirna_position = "miRNA_first"
-            elif is_mirna2:
-                mirna_position = "miRNA_last"
-            else:
-                mirna_position = "NA"  # Neither is miRNA (shouldn't happen in typical split reference)
+        # arm1 is at 5' end if arm1_start < arm2_start, otherwise arm2 is at 5' end
+        if (arm1_start < arm2_start and is_mirna1) or (arm1_start >= arm2_start and is_mirna2):
+            mirna_position = "miRNA_first"
+        elif (arm1_start < arm2_start and is_mirna2) or (arm1_start >= arm2_start and is_mirna1):
+            mirna_position = "miRNA_last"
         else:
-            # arm2 (locus2) is at 5' end
-            if is_mirna2:
-                mirna_position = "miRNA_first"
-            elif is_mirna1:
-                mirna_position = "miRNA_last"
-            else:
-                mirna_position = "NA"  # Neither is miRNA (shouldn't happen in typical split reference)
+            mirna_position = "NA"  # Neither is miRNA (shouldn't happen in typical split reference)
         
         chimera = [readid, transcriptid1, transcriptid2,
                    geneid1, geneid2, name1, name2, region1, region2,
@@ -289,6 +302,10 @@ def extract_and_write(readid, l_read_alignments, l_loci_bed, d_ref_lengths1, d_r
                    crlid1, crlid2,
                    tpm1, tpm2,
                    str(first_locus_score), str(second_locus_score), str(combined_score),
+                   "NA",  # sequences
+                   "NA",  # hybrid
+                   "NA",  # hybrid_pos
+                   "NA",  # mfe
                    mirna_position]
         chimera_found = True
         l_best_chimeras.append(chimera)
@@ -325,13 +342,8 @@ def extract_and_write(readid, l_read_alignments, l_loci_bed, d_ref_lengths1, d_r
         l_best_chimeras = update_best_hits(l_best_chimeras, "chimera")
         for a in l_best_chimeras:
             if hybridize:
-                add_locus_to_set(a[20], l_loci_bed)
-                add_locus_to_set(a[21], l_loci_bed)
-            else:
-                a.append("NA")
-                a.append("NA")
-                a.append("NA")
-                a.append("NA")
+                add_locus_to_set(a[CHIMERA_IDX_LOCUS1], l_loci_bed)
+                add_locus_to_set(a[CHIMERA_IDX_LOCUS2], l_loci_bed)
             fh_chimeras.write("\t".join(a) + "\n")
     else:
         l_best_singletons = update_best_hits(l_best_singletons, "singleton")
@@ -404,8 +416,8 @@ def hybridize_and_write(outdir, intarna_params, n, sample_name):
         for line in fh_chimeras:
             seq1 = seq2 = dotbracket = pos = energy = "NA"
             a = line.rstrip("\n").split("\t")
-            locuspos1 = a[20]
-            locuspos2 = a[21]
+            locuspos1 = a[CHIMERA_IDX_LOCUS1]
+            locuspos2 = a[CHIMERA_IDX_LOCUS2]
             if locuspos1 in d_loci_seqs and locuspos2 in d_loci_seqs:
                 seq1 = d_loci_seqs[locuspos1]
                 seq2 = d_loci_seqs[locuspos2]
@@ -414,10 +426,11 @@ def hybridize_and_write(outdir, intarna_params, n, sample_name):
                 else:
                     dotbracket, pos, energy = hybridize_with_intarna(seq1, seq2, intarna_params)
                     d_hybrids[locuspos1, locuspos2] = dotbracket, pos, energy
-            a.append(seq1 + "&" + seq2)
-            a.append(dotbracket)
-            a.append(pos)
-            a.append(energy)
+            # Replace the four "NA" fields with actual hybridization data
+            a[CHIMERA_IDX_SEQUENCES] = seq1 + "&" + seq2
+            a[CHIMERA_IDX_HYBRID] = dotbracket
+            a[CHIMERA_IDX_HYBRID_POS] = pos
+            a[CHIMERA_IDX_MFE] = energy
             fh_out.write("\t".join(a) + "\n")
     os.remove(file_chimeras)
 
@@ -428,8 +441,9 @@ def parse_annotations(f_gtf):
     exon_rel_end = 0
     exon_len = 0
     prev_transcript_id = None
-
-    limit_info = dict(gff_type=["exon", "UTR", "CDS", "miRNA", "tRNA"])
+  
+    # Support both generic "UTR" and Ensembl-specific "five_prime_utr"/"three_prime_utr"
+    limit_info = dict(gff_type=["exon", "UTR", "five_prime_utr", "three_prime_utr", "CDS", "miRNA", "tRNA"])
 
     d_attributes = defaultdict(list)
     d_attributes['tid'] = ['transcript_id', 'Name']
@@ -457,13 +471,17 @@ def parse_annotations(f_gtf):
                 # NOTE: some mature miRs have multiple locations on genome
                 # this is to select only the first location for mature miR
 
-                if sub_feature.type == 'UTR':
+                # Handle UTR features: support both generic "UTR" and Ensembl-specific types
+                if sub_feature.type in ['UTR', 'five_prime_utr', 'three_prime_utr']:
                     if transcript_id not in d_transcript_annotations['UTR']:
                         d_transcript_annotations['UTR'][transcript_id] = []
+                    # Store UTR type information for later use in region assignment
+                    utr_type = sub_feature.type
                     d_transcript_annotations['UTR'][transcript_id].append([rec.id,
                                                                            str(sub_feature.location.start),
                                                                            str(sub_feature.location.end),
-                                                                           str(sub_feature.location.strand)])
+                                                                           str(sub_feature.location.strand),
+                                                                           utr_type])
                 elif sub_feature.type == 'CDS':
                     if transcript_id not in d_transcript_annotations['CDS']:
                         d_transcript_annotations['CDS'][transcript_id] = []
@@ -658,13 +676,16 @@ def write_interaction_summary(outdir, sample_name):
                                     ";".join(sorted(set(d_interactions[interaction]["ref2"])))]) + "\n")
 
     header_interactions = "\t".join([
-        "read_count",
-        "locus1_chr", "locus1_start", "locus1_end", "locus1_strand",
-        "locus2_chr", "locus2_start", "locus2_end", "locus2_strand",
-        "sequence1", "sequence2", "dotbracket", "mfe", "hybridized_sequences",
-        "hybrid_start_pos", "hybridization_pos", "tpm1", "tpm2", "tpm",
-        "score1", "score2", "score",
-        "region1", "region2", "ref1", "ref2"
+        "supporting_read_count",
+        "locus_1_chromosome", "locus_1_start", "locus_1_end", "locus_1_strand",
+        "locus_2_chromosome", "locus_2_start", "locus_2_end", "locus_2_strand",
+        "locus_1_sequence", "locus_2_sequence", "hybridization_structure_dotbracket",
+        "hybridization_mfe_kcal_mol", "hybridized_sequence_segments",
+        "hybridization_start_positions", "hybridization_genomic_coordinates",
+        "tpm_locus_1", "tpm_locus_2", "tpm_combined",
+        "alignment_score_locus_1", "alignment_score_locus_2", "combined_alignment_score",
+        "annotation_region_locus_1", "annotation_region_locus_2",
+        "reference_transcript_id_1", "reference_transcript_id_2"
     ])
     os.system("sort -k 1nr,1 " + os.path.join(outdir, "interactions.temp") + " > " + os.path.join(outdir, "interactions.sorted"))
     with open(os.path.join(outdir, sample_name + ".interactions.txt"), "w") as fh_out:
@@ -739,7 +760,7 @@ if __name__ == "__main__":
                         help='IntaRNA --accW parameter:  sliding window size for accessibility computation')
 
     parser.add_argument('-f1', '--ref_fasta1', action='store', dest='ref_fasta1', required=True,
-                        metavar='', help='First prioroty fasta file')
+                        metavar='', help='First priority fasta file')
 
     parser.add_argument('-f2', '--ref_fasta2', action='store', dest='ref_fasta2', required=False,
                         metavar='', help='second priority fasta file')
@@ -747,8 +768,8 @@ if __name__ == "__main__":
     parser.add_argument('-f', '--ref', action='store', dest='f_ref', required=False,
                         metavar='', help='Reference fasta file')
 
-    parser.add_argument("-s", '--summerize', action='store_true', dest='summerize',
-                        help="Summerize interactions at loci level")
+    parser.add_argument("-s", '--summarize', action='store_true', dest='summarize',
+                        help="Summarize interactions at loci level")
 
     parser.add_argument('-n', '--sample_name', action='store', dest='sample_name', required=True,
                         metavar='', help='Sample name prefix for output files')
@@ -758,7 +779,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     print('CRL file                             : ' + args.crl_file)
-    print('Outpur direcoty                      : ' + args.outdir)
+    print('Output directory                     : ' + args.outdir)
     if args.f_gtf:
         print('Annotation file                      : ' + args.f_gtf)
     print('Number of processes                  : ' + str(args.processes))
@@ -772,7 +793,7 @@ if __name__ == "__main__":
         print('2nd priority reference fasta file    : ' + args.ref_fasta2)
     if args.f_ref:
         print('Reference genomic fasta file         : ' + args.f_ref)
-    print('Summerize interactions at loci level : ' + str(args.summerize))
+    print('Summarize interactions at loci level : ' + str(args.summarize))
     print('Sample name                            : ' + args.sample_name)
     print("===================================================================")
 
@@ -888,59 +909,59 @@ if __name__ == "__main__":
 
     # cleanup intermediate files
     # header fields
-    header_chimeras = "\t".join(["tagid",
-                                 "txid1",
-                                 "txid2",
-                                 "geneid1",
-                                 "geneid2",
-                                 "symbol1",
-                                 "symbol2",
-                                 "region1",
-                                 "region2",
-                                 "tx_pos_start1",
-                                 "tx_pos_end1",
-                                 "tx_pos_strand1",
-                                 "length1",
-                                 "tx_pos_start2",
-                                 "tx_pos_end2",
-                                 "tx_pos_strand2",
-                                 "length2",
-                                 "read_info",
-                                 "genomic_pos1",
-                                 "genomic_pos2",
-                                 "locus1",
-                                 "locus2",
-                                 "groupid1",
-                                 "groupid2",
-                                 "tpm1",
-                                 "tpm2",
-                                 "score1",
-                                 "score2",
-                                 "score",
-                                 "sequences",
-                                 "hybrid",
-                                 "hybrid_pos",
-                                 "mfe",
-                                 "mirna_position"])
+    header_chimeras = "\t".join(["read_id",
+                                 "transcript_id_1",
+                                 "transcript_id_2",
+                                 "gene_id_1",
+                                 "gene_id_2",
+                                 "gene_symbol_1",
+                                 "gene_symbol_2",
+                                 "annotation_region_1",
+                                 "annotation_region_2",
+                                 "transcript_start_1",
+                                 "transcript_end_1",
+                                 "transcript_strand_1",
+                                 "transcript_length_1",
+                                 "transcript_start_2",
+                                 "transcript_end_2",
+                                 "transcript_strand_2",
+                                 "transcript_length_2",
+                                 "read_alignment_info",
+                                 "genomic_coordinates_1",
+                                 "genomic_coordinates_2",
+                                 "locus_id_1",
+                                 "locus_id_2",
+                                 "crl_group_id_1",
+                                 "crl_group_id_2",
+                                 "tpm_1",
+                                 "tpm_2",
+                                 "alignment_score_1",
+                                 "alignment_score_2",
+                                 "combined_alignment_score",
+                                 "hybridized_sequences",
+                                 "hybridization_structure",
+                                 "hybridization_positions",
+                                 "hybridization_mfe_kcal_mol",
+                                 "mirna_read_position"])
     merge_files(chimeras_prefix, chimeras_file, header_chimeras, args.processes)
-    header_singletons = "\t".join(["tagid",
-                                   "txid",
-                                   "geneid",
-                                   "symbol",
-                                   "region",
-                                   "tx_pos_start",
-                                   "tx_pos_end",
-                                   "tx_pos_strand",
-                                   "length",
-                                   "read_info",
-                                   "genomic_pos",
-                                   "locus",
-                                   "groupid",
+    header_singletons = "\t".join(["read_id",
+                                   "transcript_id",
+                                   "gene_id",
+                                   "gene_symbol",
+                                   "annotation_region",
+                                   "transcript_start",
+                                   "transcript_end",
+                                   "transcript_strand",
+                                   "transcript_length",
+                                   "read_alignment_info",
+                                   "genomic_coordinates",
+                                   "locus_id",
+                                   "crl_group_id",
                                    "tpm",
-                                   "score"])
+                                   "alignment_score"])
     singletons_file = os.path.join(args.outdir, args.sample_name + ".singletons.txt")
     merge_files(singletons_prefix, singletons_file, header_singletons, args.processes)
     print(str(datetime.datetime.now()), " END: multiprocessing")
-    if args.summerize:
+    if args.summarize:
         write_interaction_summary(args.outdir, args.sample_name)
 

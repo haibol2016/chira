@@ -9,10 +9,10 @@ import chira_utilities
 def align_with_bwa(align_type, index_type, query_fasta, refindex, outdir, seed_length, align_score,
                    macth_score, mistmatch_score, gap_o, gap_e, n_aligns, processes):
     """
-        Funtion that maps the reads to the transcriptome. Different parameters
+        Function that maps the reads to the transcriptome. Different parameters
         are used for long and short alignments.
         Parameters:
-            align_type: String of alignmnet type (long or short) used to format the output file name.
+            align_type: String of alignment type (long or short) used to format the output file name.
             index_type: String of index1 type (index1 or index2) used to format the output file name.
             query_fasta: Path to query fasta file. For align_type short, long.unmapped.fa from the out_dir used.
             refindex: Path to the reference index file.
@@ -219,7 +219,7 @@ def clan_to_bed(outdir):
             else:
                 continue
             
-            for mapped_location in mapped_locations.split(";"):
+            for mapped_location in location_list:
                 d = mapped_location.split(":")
                 # if header has spaces select the id only
                 ref_id = ":".join(d[0:-1]).split(' ')[0]
@@ -246,13 +246,13 @@ if __name__ == "__main__":
                         help='Output directory path for the analysis')
 
     parser.add_argument('-x1', '--index1', action='store', dest='idx1', required=False,
-                        metavar='', help='first prioroty index file')
+                        metavar='', help='first priority index file')
 
     parser.add_argument('-x2', '--index2', action='store', dest='idx2', required=False,
                         metavar='', help='second priority index file')
 
     parser.add_argument('-f1', '--ref_fasta1', action='store', dest='ref_fasta1', required=False,
-                        metavar='', help='First prioroty fasta file')
+                        metavar='', help='First priority fasta file')
 
     parser.add_argument('-f2', '--ref_fasta2', action='store', dest='ref_fasta2', required=False,
                         metavar='', help='second priority fasta file')
@@ -413,22 +413,22 @@ if __name__ == "__main__":
                        args.match1, args.mismatch1, args.gapopen1, args.gapext1, args.nhits1, args.processes)
         chira_utilities.print_w_time("END: Map long read segments to index1 at " + index1)
 
-        chira_utilities.print_w_time("STRAT: Map short read segments to index1 at " + index1)
+        chira_utilities.print_w_time("START: Map short read segments to index1 at " + index1)
         align_with_bwa("short", "index1", args.fasta, index1, args.outdir, args.seed_length2, args.align_score2,
                        args.match2, args.mismatch2, args.gapopen2, args.gapext2, args.nhits2, args.processes)
         chira_utilities.print_w_time("END: Map short read segments to index1 at " + index1)
 
         if index2:
-            chira_utilities.print_w_time("STRAT: Map long read segments to index2 at " + index2)
+            chira_utilities.print_w_time("START: Map long read segments to index2 at " + index2)
             align_with_bwa("long", "index2", args.fasta, index2, args.outdir, args.seed_length1, args.align_score1,
                            args.match1, args.mismatch1, args.gapopen1, args.gapext1, args.nhits1, args.processes)
             chira_utilities.print_w_time("END: Map long read segments to index2 at " + index2)
-            chira_utilities.print_w_time("STRAT: Map short read segments to index2 at " + index2)
+            chira_utilities.print_w_time("START: Map short read segments to index2 at " + index2)
             align_with_bwa("short", "index2", args.fasta, index2, args.outdir, args.seed_length2, args.align_score2,
                            args.match2, args.mismatch2, args.gapopen2, args.gapext2, args.nhits2, args.processes)
             chira_utilities.print_w_time("END: Map short read segments to index2 at " + index2)
 
-            chira_utilities.print_w_time("STRAT: Merge BAM files")
+            chira_utilities.print_w_time("START: Merge BAM files")
             # -f to force if file already exists
             pysam.merge("-f", "-@", str(args.processes),
                         os.path.join(args.outdir, "unsorted.bam"),
