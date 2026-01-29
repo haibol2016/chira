@@ -27,10 +27,10 @@ The following Python packages need to be installed via pip or conda:
 ### Optional Dependencies
 
 4. **pyliftover**
-   - Used in: `gff3_to_gtf.py` (optional, only when using coordinate liftover)
+   - Used in: `download_mirbase_gff3.py` (optional, only when using coordinate liftover)
    - Import: `from pyliftover import LiftOver`
    - Purpose: Converting coordinates between different genome versions
-   - Note: Only required if using `--source-genome`, `--target-genome`, and `--chain-file` options in `gff3_to_gtf.py`
+   - Note: Only required if using `--source-genome`, `--target-genome`, and `--chain-file` options in `download_mirbase_gff3.py`
 
 5. **requests**
    - Used in: `download_ensembl.py`
@@ -132,8 +132,8 @@ For CLAN and blockbuster, please refer to their respective documentation for ins
 
 ### Utility Scripts
 
-- **gff3_to_gtf.py**: Requires `pyliftover` (optional, only for liftover)
 - **download_ensembl.py**: Requires `requests`
+- **download_mirbase_gff3.py**: Requires `pyliftover` (optional, only for coordinate liftover)
 - **download_mirbase_mature.py**: No external dependencies (uses standard library only)
 - **remove_mirna_hairpin_from_gtf.py**: No external dependencies (uses standard library only)
 - **remove_mirna_hairpin_from_fasta.py**: Requires `biopython`
@@ -145,7 +145,7 @@ For CLAN and blockbuster, please refer to their respective documentation for ins
   - **CLAN**: Only needed if using CLAN aligner instead of BWA (not recommended)
   - **blockbuster.x**: Only needed if using block-based merging method
   - **IntaRNA**: Only needed if using the `--hybridize` option in `chira_extract.py`
-  - **pyliftover**: Only needed if using coordinate liftover in `gff3_to_gtf.py`
+  - **pyliftover**: Only needed if using coordinate liftover in `download_mirbase_gff3.py`
 
 - Standard library modules used (no installation needed):
   - `argparse`, `os`, `sys`, `collections`, `multiprocessing`, `itertools`, `datetime`, `subprocess`, `math`, `re`, `copy`, `gzip`, `shutil`, `ftplib`, `urllib`, `tempfile`, `time`

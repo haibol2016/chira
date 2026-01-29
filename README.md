@@ -102,7 +102,7 @@ If you prefer to install dependencies manually:
 - pysam
 
 **Optional Python packages:**
-- pyliftover (for `gff3_to_gtf.py` coordinate liftover)
+- pyliftover (for `download_mirbase_gff3.py` coordinate liftover)
 - requests (for `download_ensembl.py`)
 
 **Command-line tools:**
@@ -740,12 +740,14 @@ download_mirbase_mature.py -s hsa -o mature_mirna_hsa.fasta
 
 ### download_mirbase_gff3.py
 
-**Description:** Downloads species-specific GFF3 files from miRBase containing chromosomal coordinates of microRNAs.
+**Description:** Downloads species-specific GFF3 files from miRBase containing chromosomal coordinates of microRNAs. Supports coordinate liftover between genome assemblies and chromosome name mapping.
 
 **Key Features:**
 - Downloads current or version-specific GFF3 files
 - Contains both miRNA_primary_transcript (hairpin precursors) and miRNA (mature sequences)
-- Optional chromosome name mapping for coordinate conversion
+- **Coordinate liftover**: Convert coordinates between genome assemblies (e.g., hg19 → hg38) using pyliftover
+- **Chromosome name mapping**: Rename chromosomes based on a mapping file
+- Processing order: Download → Liftover → Rename chromosomes
 - Can be used directly with ChiRA (no GTF conversion needed)
 
 **Required Inputs:**
@@ -754,20 +756,46 @@ download_mirbase_mature.py -s hsa -o mature_mirna_hsa.fasta
 
 **Optional Parameters:**
 - `--mirbase-version`: miRBase version number (e.g., "21"). Default: CURRENT version
+- `--timeout`: Download timeout in seconds (default: 60)
+- `--source-genome`: Source genome assembly name for coordinate liftover (e.g., hg19, hg38, mm9, mm10)
+  - Required if `--chain-file` is provided
+- `--target-genome`: Target genome assembly name for coordinate liftover (e.g., hg19, hg38, mm9, mm10)
+  - Required if `--chain-file` is provided
+- `--chain-file`: Path to chain file for coordinate liftover
+  - Chain files can be downloaded from UCSC Genome Browser (e.g., https://hgdownload.soe.ucsc.edu/downloads.html)
+  - Requires `pyliftover` package (install with: `pip install pyliftover`)
+  - If provided, `--source-genome` and `--target-genome` must also be provided
 - `-m, --chromosome-mapping`: Tab-separated file with two columns: `gff3_chromosome_name<tab>target_chromosome_name`
   - Chromosome names in the GFF3 file will be converted to target names in the output
-- `--timeout`: Download timeout in seconds (default: 60)
+  - Applied after coordinate liftover (if performed)
 
-**Usage Example:**
+**Usage Examples:**
 ```bash
 # Download current version
 download_mirbase_gff3.py -s hsa -o hsa.gff3
 
 # Download specific version with chromosome mapping
 download_mirbase_gff3.py -s hsa -o hsa.gff3 --mirbase-version 21 -m chr_mapping.txt
+
+# Download with coordinate liftover (hg19 to hg38)
+download_mirbase_gff3.py -s hsa -o hsa_hg38.gff3 \
+  --source-genome hg19 --target-genome hg38 \
+  --chain-file hg19ToHg38.over.chain
+
+# Download with both liftover and chromosome mapping
+download_mirbase_gff3.py -s hsa -o hsa_processed.gff3 \
+  --source-genome hg19 --target-genome hg38 \
+  --chain-file hg19ToHg38.over.chain \
+  -m chr_mapping.txt
 ```
 
 **Note:** The GFF3 file from miRBase contains mature miRNA coordinates and can be used directly with ChiRA. You don't need to convert it to GTF format unless you want to combine it with Ensembl annotations.
+
+**Coordinate Liftover:**
+- Liftover converts coordinates from one genome assembly to another (e.g., GRCh37/hg19 to GRCh38/hg38)
+- Chain files are available from UCSC Genome Browser for common assembly conversions
+- Liftover is performed first, then chromosome renaming (if provided)
+- Features that cannot be lifted over will retain their original coordinates
 
 ---
 
@@ -859,7 +887,7 @@ remove_mirna_hairpin_from_fasta.py -g annotation.gtf -f transcriptome.fasta -o t
 - Optionally removes comment lines from target GTF
 
 **Required Inputs:**
-- `-m, --mirna-gtf`: Mature miRNA GTF file (output from `gff3_to_gtf.py`)
+- `-m, --mirna-gtf`: Mature miRNA GTF file (can be converted from miRBase GFF3 if needed)
 - `-t, --target-gtf`: Target transcriptome GTF file (output from `remove_mirna_hairpin_from_gtf.py`)
 - `-o, --output`: Output combined GTF file
 

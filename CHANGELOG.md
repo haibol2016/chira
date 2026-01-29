@@ -30,14 +30,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **CHANGELOG.md**:
   - Added changelog file to track all modifications
 
-- **gff3_to_gtf.py** (new utility script):
-  - Created standalone script to convert GFF3 format to GTF format following ENSEMBL conventions
-  - Handles ID/Parent relationships, attribute conversion, hierarchical structure
-  - Supports chromosome name mapping via `--chromosome_mapping` parameter
-  - Supports coordinate liftover between genome versions using pyliftover
-  - Parameters: `--source-genome`, `--target-genome`, `--chain-file` for liftover functionality
-  - Converts miRBase GFF3 files to ENSEMBL-compatible GTF format
-
 - **download_ensembl.py** (new utility script):
   - Created script to download Ensembl files (cDNA, ncRNA, GTF, genome FASTA)
   - Supports downloading from specific Ensembl release versions
@@ -58,8 +50,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Created script to download species-specific GFF3 annotation files from miRBase
   - Supports CURRENT version (default) or specific version via `--mirbase-version` parameter
   - Supports chromosome name mapping via `--chromosome_mapping` parameter
-  - Can be used as alternative to GTF conversion for reference preparation
-  - Parameters: `--species`, `--output`, `--mirbase-version`, `--chromosome_mapping`
+  - **Coordinate liftover support**: Convert coordinates between genome assemblies (e.g., hg19 → hg38) using pyliftover
+    - Parameters: `--source-genome`, `--target-genome`, `--chain-file` for liftover functionality
+    - Processing order: Download → Liftover → Rename chromosomes
+    - Handles GFF3 1-based coordinates correctly (converts to 0-based for pyliftover, back to 1-based for output)
+    - Updates chromosome names if they change during liftover
+    - Features that cannot be lifted over retain their original coordinates
+  - Can be used directly with ChiRA (no GTF conversion needed)
+  - Parameters: `--species`, `--output`, `--mirbase-version`, `--chromosome_mapping`, `--source-genome`, `--target-genome`, `--chain-file`
 
 - **concatenate_fasta.py** (new utility script):
   - Created script to concatenate multiple FASTA files into a single file
@@ -173,7 +171,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Updated to reflect that `chira_collapse.py` no longer uses Biopython
   - Updated BEDTools commands to reflect automatic version detection
   - Added documentation for new utility scripts and their dependencies
-  - Added optional dependencies: pyliftover (for gff3_to_gtf.py), requests (for download_ensembl.py)
+  - Added optional dependencies: pyliftover (for `download_mirbase_gff3.py` coordinate liftover), requests (for `download_ensembl.py`)
   - Documented script-specific dependencies
 
 ### Fixed
@@ -259,10 +257,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Automatic detection**: BEDTools version is automatically detected and appropriate commands are used
 
 ### New Utility Scripts
-- **gff3_to_gtf.py**: Convert GFF3 to GTF format with optional coordinate liftover
-  - Handles miRBase GFF3 format conversion to ENSEMBL GTF
-  - Supports chromosome name mapping
-  - Optional genome version liftover using pyliftover
 - **download_ensembl.py**: Download Ensembl reference files (cDNA, ncRNA, GTF, genome)
   - Downloads primary assembly genome FASTA (not toplevel)
   - Auto-detects assembly names
@@ -272,8 +266,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Supports specific versions or CURRENT
 - **download_mirbase_gff3.py**: Download species-specific GFF3 annotation files from miRBase
   - Supports CURRENT version or specific version
-  - Supports chromosome name mapping
-  - Alternative to GTF conversion for reference preparation
+  - **Coordinate liftover**: Convert coordinates between genome assemblies (e.g., hg19 → hg38, mm9 → mm10)
+    - Uses pyliftover with UCSC chain files
+    - Processing order: Download → Liftover → Rename chromosomes
+    - Handles coordinate conversion correctly (GFF3 1-based to pyliftover 0-based and back)
+    - Updates chromosome names if changed during liftover
+  - **Chromosome name mapping**: Rename chromosomes based on a mapping file
+  - Can be used directly with ChiRA (no GTF conversion needed)
 - **concatenate_fasta.py**: Concatenate multiple FASTA files into a single file
   - Handles various FASTA header formats
   - Useful for combining miRNA and target transcriptome FASTA files

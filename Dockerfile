@@ -47,10 +47,13 @@ ENV HOME=/home/chira
 ENV TMPDIR=/tmp
 
 # Create Singularity environment script (automatically sourced by Singularity)
+# This ensures environment variables are set correctly when converting to Singularity
+# Note: Singularity automatically sources scripts in /.singularity.d/env/ directory
 RUN mkdir -p /.singularity.d/env && \
     echo '#!/bin/bash' > /.singularity.d/env/91-environment.sh && \
+    echo '# ChiRA environment setup for Singularity' >> /.singularity.d/env/91-environment.sh && \
     echo 'export CONDA_PREFIX=/opt/conda' >> /.singularity.d/env/91-environment.sh && \
-    echo 'export PATH=/app:/opt/conda/bin:${PATH}' >> /.singularity.d/env/91-environment.sh && \
+    echo 'export PATH=/app:/opt/conda/bin:$PATH' >> /.singularity.d/env/91-environment.sh && \
     echo 'export PYTHONPATH=/app' >> /.singularity.d/env/91-environment.sh && \
     echo 'export HOME=/home/chira' >> /.singularity.d/env/91-environment.sh && \
     echo 'export TMPDIR=/tmp' >> /.singularity.d/env/91-environment.sh && \
