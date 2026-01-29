@@ -449,7 +449,8 @@ def parse_annotations(f_gtf):
     d_attributes['tid'] = ['transcript_id', 'Name']
     d_attributes['gid'] = ['gene_id', 'Alias']
     d_attributes['name'] = ['gene_name', 'Name']
-    d_attributes['type'] = ['gene_biotype', 'Type']
+    # Use transcript_biotype first (transcript-level), then gene_biotype as fallback
+    d_attributes['type'] = ['transcript_biotype', 'gene_biotype', 'Type']
 
     l_seen_exons = set()
     with open(f_gtf) as gtf_handle:
