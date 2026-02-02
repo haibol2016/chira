@@ -2,8 +2,17 @@
 import argparse
 import os
 import sys
+import subprocess
 import pysam
 import chira_utilities
+
+# Optional dependency for automatic memory detection
+# If not available, memory calculation will use a safe default
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
 
 
 def align_with_bwa(align_type, index_type, query_fasta, refindex, outdir, seed_length, align_score,
@@ -44,7 +53,9 @@ def align_with_bwa(align_type, index_type, query_fasta, refindex, outdir, seed_l
                   refindex,
                   query_fasta
                   ]
-    bwacall = ("bwa mem " + " ".join(bwa_params) + " | samtools view -hb - > " + bam)
+    # OPTIMIZATION: samtools view uses multi-threading (-@) to speed up SAM to BAM conversion
+    # This parallelizes compression/decompression, which is especially beneficial for large files
+    bwacall = ("bwa mem " + " ".join(bwa_params) + " | samtools view -hb -@ " + str(processes) + " - > " + bam)
     print(bwacall)
     os.system(bwacall)
 
@@ -61,7 +72,13 @@ def write_mapped_bed(bam, bed, fasta, stranded):
     prev_readid = None
     prev_fasta = ""
     prev_unmapped = True
-    with pysam.Samfile(bam, "rb") as fh_bam, open(bed, "w") as fh_mapped_bed, open(fasta, "w") as fh_unmapped_fasta:
+    # OPTIMIZATION: Use larger buffer size (2MB) for file I/O to reduce system calls
+    # This significantly improves performance for large BAM files with many small writes
+    # 2MB is a good balance between memory usage and I/O efficiency
+    BUFFER_SIZE = 2 * 1024 * 1024  # 2MB buffer
+    with pysam.Samfile(bam, "rb") as fh_bam, \
+         open(bed, "w", buffering=BUFFER_SIZE) as fh_mapped_bed, \
+         open(fasta, "w", buffering=BUFFER_SIZE) as fh_unmapped_fasta:
         for alignment in fh_bam.fetch(until_eof=True):
             readid = alignment.query_name
             if readid != prev_readid:
@@ -190,7 +207,12 @@ def align_with_clan(query_fasta, outdir, ref_fasta1, ref_index1, ref_fasta2, ref
     return
 
 def clan_to_bed(outdir):
-    with open(os.path.join(outdir, "out.map")) as fh_in, open(os.path.join(outdir, "mapped.bed"), "w") as fh_out:
+    # OPTIMIZATION: Use larger buffer size (2MB) for file I/O to reduce system calls
+    # This significantly improves performance for large CLAN output files
+    # 2MB is a good balance between memory usage and I/O efficiency
+    BUFFER_SIZE = 2 * 1024 * 1024  # 2MB buffer
+    with open(os.path.join(outdir, "out.map"), buffering=BUFFER_SIZE) as fh_in, \
+         open(os.path.join(outdir, "mapped.bed"), "w", buffering=BUFFER_SIZE) as fh_out:
         next(fh_in)
         for line in fh_in:
             [read_id,
@@ -201,9 +223,28 @@ def clan_to_bed(outdir):
              mapped_locations] = line.rstrip("\n").rstrip("\t").split("\t")
             
             # Build cigar string more efficiently
+            # Convert strings to integers for arithmetic operations
+            try:
+                read_mapped_begin = int(read_mapped_begin)
+                read_mapped_end = int(read_mapped_end)
+                read_length = int(read_length)
+            except ValueError as e:
+                print(f"Warning: Skipping line with invalid numeric values: {line[:100]}, error: {e}", file=sys.stderr)
+                continue
+            
+            # Defensive check: ensure values are valid (non-negative, logical ordering)
+            if read_mapped_begin < 1 or read_mapped_end < read_mapped_begin or read_length < read_mapped_end:
+                print(f"Warning: Skipping line with invalid position values (begin={read_mapped_begin}, end={read_mapped_end}, length={read_length}): {line[:100]}", file=sys.stderr)
+                continue
+            
             lead_soft_clips = read_mapped_begin - 1
             match_len = read_mapped_end - read_mapped_begin + 1
             trail_soft_clips = read_length - read_mapped_end
+            
+            # Defensive check: ensure match_len is positive
+            if match_len <= 0:
+                print(f"Warning: Skipping line with invalid match length ({match_len}): {line[:100]}", file=sys.stderr)
+                continue
             
             cigar_parts = []
             if lead_soft_clips > 0:
@@ -221,12 +262,27 @@ def clan_to_bed(outdir):
             
             for mapped_location in location_list:
                 d = mapped_location.split(":")
+                # Defensive check: ensure location has at least 2 parts (ref_id and position range)
+                if len(d) < 2:
+                    print(f"Warning: Skipping malformed location (expected 'ref_id:start-end', got '{mapped_location}'): {line[:100]}", file=sys.stderr)
+                    continue
                 # if header has spaces select the id only
                 ref_id = ":".join(d[0:-1]).split(' ')[0]
-                [ref_start, ref_end] = d[-1].split("-")
+                position_range = d[-1].split("-")
+                # Defensive check: ensure position range has start and end
+                if len(position_range) < 2:
+                    print(f"Warning: Skipping malformed position range (expected 'start-end', got '{d[-1]}'): {line[:100]}", file=sys.stderr)
+                    continue
+                [ref_start, ref_end] = position_range
+                try:
+                    ref_start_int = int(ref_start)
+                except ValueError:
+                    print(f"Warning: Skipping location with invalid start position '{ref_start}': {line[:100]}", file=sys.stderr)
+                    continue
                 # NOTE: at the moment there is no way to findout which strand it is mapping to
-                fh_out.write("\t".join([ref_id, str(int(ref_start)-1), ref_end,
-                                        ",".join([read_id, ref_id, str(int(ref_start)-1), ref_end, "+", cigar]),
+                ref_start_minus_one = ref_start_int - 1
+                fh_out.write("\t".join([ref_id, str(ref_start_minus_one), ref_end,
+                                        ",".join([read_id, ref_id, str(ref_start_minus_one), ref_end, "+", cigar]),
                                         "1", "+"]) + "\n")
 
 
@@ -264,12 +320,26 @@ if __name__ == "__main__":
                         dest='processes',
                         help='Number of processes to use')
 
+    parser.add_argument('--sort_memory', action='store', type=str, default=None, metavar='',
+                        dest='sort_memory',
+                        help='Memory per thread for BAM sorting (e.g., "2G", "3G"). '
+                             'If not specified, automatically calculates based on available RAM. '
+                             'More memory reduces temporary files and I/O, improving performance. '
+                             'Total memory used = sort_memory × processes, so ensure sufficient RAM.')
+
     parser.add_argument("-s", '--stranded', type=str, choices=["fw", "rc", "both"], default='fw', metavar='',
                         dest='stranded',
                         help='''Strand-specificity of input samples.
-                             fw = map to transcript strand;
-                             rc = map to reverse compliment of transcript strand;
-                             both = try to map on both strnads''')
+                             fw = map to transcript strand (default, recommended for most protocols like CLASH, CLEAR-CLIP, PARIS, SPLASH);
+                             rc = map to reverse complement of transcript strand (use if your library protocol produces reads from antisense strand);
+                             both = map on both strands (use only for unstranded libraries where strand information is not preserved).
+                             
+                             When to use:
+                             - Most RNA-RNA interactome protocols (CLASH, CLEAR-CLIP, PARIS, SPLASH) are stranded and use "fw"
+                             - Use "rc" only if you know your protocol produces reads from the reverse complement strand
+                             - Use "both" only for unstranded libraries (rare for interactome protocols)
+                             
+                             Stranded mapping filters out alignments on the wrong strand, reducing false positives and improving chimeric read detection.''')
 
     parser.add_argument("-l1", '--seed_length1', action='store', type=int, default=12, metavar='',
                         dest='seed_length1',
@@ -429,8 +499,10 @@ if __name__ == "__main__":
             chira_utilities.print_w_time("END: Map short read segments to index2 at " + index2)
 
             chira_utilities.print_w_time("START: Merge BAM files")
+            # OPTIMIZATION: pysam.merge uses multi-threading (-@) to parallelize BAM merging
+            # This significantly speeds up merging multiple BAM files, especially for large datasets
             # -f to force if file already exists
-            pysam.merge("-f", "-@", str(args.processes),
+            pysam.merge("-f", "-@", str(max(1, args.processes)),
                         os.path.join(args.outdir, "unsorted.bam"),
                         os.path.join(args.outdir, "index1.long.bam"),
                         os.path.join(args.outdir, "index1.short.bam"),
@@ -439,8 +511,9 @@ if __name__ == "__main__":
             chira_utilities.print_w_time("END: Merge BAM files")
         else:
             chira_utilities.print_w_time("START: Merge BAM files")
+            # OPTIMIZATION: pysam.merge uses multi-threading (-@) to parallelize BAM merging
             # -f to force if file already exists
-            pysam.merge("-f", "-@", str(args.processes),
+            pysam.merge("-f", "-@", str(max(1, args.processes)),
                         os.path.join(args.outdir, "unsorted.bam"),
                         os.path.join(args.outdir, "index1.long.bam"),
                         os.path.join(args.outdir, "index1.short.bam"))
@@ -456,7 +529,43 @@ if __name__ == "__main__":
             pass
 
         chira_utilities.print_w_time("START: Sorting BAM file")
-        pysam.sort("-m", "1G", "-@", str(args.processes), "-n",
+        # OPTIMIZATION: pysam.sort uses multi-threading (-@) to parallelize BAM sorting
+        # This is one of the most time-consuming steps and benefits greatly from parallelization
+        # OPTIMIZATION: Calculate optimal memory per thread for sorting
+        # More memory reduces temporary files and I/O operations, significantly improving performance
+        # Rule of thumb: Use 2-4G per thread, but ensure total (memory × processes) < available RAM
+        if args.sort_memory:
+            sort_memory = args.sort_memory
+        else:
+            # Auto-calculate: try to use 2-3G per thread, but cap at available RAM
+            if PSUTIL_AVAILABLE:
+                try:
+                    available_gb = psutil.virtual_memory().available / (1024**3)
+                    # Reserve 2GB for OS and other processes, then divide by number of processes
+                    # Defensive check: ensure processes > 0 to avoid division by zero
+                    # Use max(1, args.processes) to ensure we always divide by at least 1
+                    num_processes = max(1, args.processes)
+                    usable_gb = (available_gb - 2) / num_processes
+                    # Use 2-3G per thread if possible, but don't exceed available memory
+                    # If usable_gb < 2, use what's available (minimum 1G) to avoid exceeding RAM
+                    if usable_gb >= 2:
+                        sort_memory_gb = min(3, int(usable_gb))
+                    else:
+                        # Use available memory, but at least 1G (samtools sort minimum)
+                        # Ensure usable_gb is positive before converting to int
+                        sort_memory_gb = max(1, int(max(0, usable_gb)))
+                    sort_memory = f"{sort_memory_gb}G"
+                except (AttributeError, OSError, ZeroDivisionError):
+                    # Fallback if psutil fails at runtime or division error (shouldn't happen, but be safe)
+                    sort_memory = "2G"
+            else:
+                # Fallback: use 2G per thread (better default than 1G)
+                # This is a safe default that works well for most systems
+                # Install psutil (pip install psutil) for automatic memory detection
+                sort_memory = "2G"
+        
+        # -m sets memory per thread, -n sorts by read name
+        pysam.sort("-m", sort_memory, "-@", str(max(1, args.processes)), "-n",
                    os.path.join(args.outdir, "unsorted.bam"),
                    "-T", os.path.join(args.outdir, "sorted"),
                    "-o", os.path.join(args.outdir, "sorted.bam"))
@@ -474,7 +583,22 @@ if __name__ == "__main__":
         sys.exit(1)
 
     chira_utilities.print_w_time("START: Sorting BED file")
-    os.system("sort -k 4,4 -u " + os.path.join(args.outdir, "mapped.bed")
-              + ">" + os.path.join(args.outdir, "sorted.bed"))
+    # OPTIMIZATION: Use parallel sort if available (GNU sort supports --parallel option)
+    # For systems with GNU sort >= 8.6, this can significantly speed up sorting large BED files
+    # Fall back to standard sort if --parallel is not supported
+    sort_cmd = "sort"
+    try:
+        # Check if GNU sort with --parallel is available (GNU sort >= 8.6)
+        result = subprocess.run(["sort", "--version"], capture_output=True, text=True, timeout=2)
+        if "GNU coreutils" in result.stdout and args.processes > 0:
+            # Use parallel sort with number of threads equal to processes
+            # Defensive check: ensure processes > 0 (default is 1, so this should always be true)
+            sort_cmd = f"sort --parallel={max(1, args.processes)}"
+    except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError):
+        # Fall back to standard sort if check fails
+        pass
+    
+    os.system(sort_cmd + " -k 4,4 -u " + os.path.join(args.outdir, "mapped.bed")
+              + " > " + os.path.join(args.outdir, "sorted.bed"))
     chira_utilities.print_w_time("END: Sorting BED file")
     os.remove(os.path.join(args.outdir, "mapped.bed"))

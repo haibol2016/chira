@@ -28,10 +28,24 @@ if __name__ == "__main__":
     # Cache UMI length check to avoid repeated conditionals
     has_umi = args.umi_len > 0
     
+    # OPTIMIZATION: Use larger buffer size (2MB) for I/O efficiency with large FASTQ files
+    # This significantly reduces system calls and improves performance
+    # 2MB is a good balance between memory usage and I/O efficiency
+    BUFFER_SIZE = 2 * 1024 * 1024  # 2MB buffer
+    
     # Use raw file parsing for better performance with large files
     # This is significantly faster than SeqIO.parse() for very large FASTQ files
     # FASTQ format: @header (line 1), sequence (line 2), +header (line 3), quality (line 4)
-    with gzip.open(args.fastq, 'rt') if args.fastq.endswith('.gz') else open(args.fastq) as fh_fastq:
+    # Note: gzip.open() already has internal buffering, so we only apply explicit buffering to regular files
+    if args.fastq.endswith('.gz'):
+        # gzip.open() in text mode already uses internal buffering for decompression
+        # Additional buffering layer is not needed and could complicate the code
+        fh_fastq = gzip.open(args.fastq, 'rt')
+    else:
+        # For regular files, use buffering parameter to reduce system calls
+        fh_fastq = open(args.fastq, 'r', buffering=BUFFER_SIZE)
+    
+    with fh_fastq:
         line_num = 0
         for line in fh_fastq:
             line_num += 1
@@ -47,8 +61,10 @@ if __name__ == "__main__":
                 d_uniq_reads[(sequence, umi)] += 1
     
     # Write output with optimized string formatting
+    # OPTIMIZATION: Use larger buffer size (2MB) for write operations
+    # This reduces write system calls and improves performance for large output files
     c = 1
-    with open(args.fasta, "w") as fh_out:
+    with open(args.fasta, "w", buffering=BUFFER_SIZE) as fh_out:
         # Sort items once and iterate directly
         # Use f-strings for better performance than concatenation
         for (sequence, umi), readcount in sorted(d_uniq_reads.items()):

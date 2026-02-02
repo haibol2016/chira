@@ -362,13 +362,16 @@ def write_chimeras(chunk_start, chunk_end, total_read_count, d_ref_lengths1, d_r
     # This avoids CPU overhead during parallel processing and merge operations
     
     # Open files (intermediate files are always uncompressed)
+    # OPTIMIZATION: Use larger buffer size (2MB) for better I/O performance with large files
+    # This reduces system calls and improves throughput, especially for sequential reads/writes
+    BUFFER_SIZE = 2 * 1024 * 1024  # 2MB buffer
     open_func = open
     open_mode = "w"
     
     # make bed entry for extracing locus sequence and hybridizing
-    with open_func(file_chimeras, open_mode) as fh_chimeras, \
-         open_func(file_singletons, open_mode) as fh_singletons, \
-         open(crl_file) as fh_crl:
+    with open_func(file_chimeras, open_mode, buffering=BUFFER_SIZE) as fh_chimeras, \
+         open_func(file_singletons, open_mode, buffering=BUFFER_SIZE) as fh_singletons, \
+         open(crl_file, "r", buffering=BUFFER_SIZE) as fh_crl:
         prev_readid = None
         l_readlines = []
         read_count = 0
@@ -404,14 +407,18 @@ def write_chimeras(chunk_start, chunk_end, total_read_count, d_ref_lengths1, d_r
 
     if hybridize:
         # loci sequences are neeeded to hybridize
-        with open(os.path.join(outdir, "loci.bed.") + str(n), "w") as fh_bed:
+        # OPTIMIZATION: Use larger buffer size (2MB) for better I/O performance
+        BUFFER_SIZE = 2 * 1024 * 1024  # 2MB buffer
+        with open(os.path.join(outdir, "loci.bed.") + str(n), "w", buffering=BUFFER_SIZE) as fh_bed:
             for bed_line in l_loci_bed:
                 fh_bed.write(bed_line + "\n")
 
 
 def hybridize_and_write(outdir, intarna_params, n, sample_name, compress=False):
     d_loci_seqs = defaultdict()
-    fa_seq = SeqIO.parse(open(os.path.join(outdir, "loci.fa.") + n), 'fasta')
+    # OPTIMIZATION: Use larger buffer size (2MB) for better I/O performance
+    BUFFER_SIZE = 2 * 1024 * 1024  # 2MB buffer
+    fa_seq = SeqIO.parse(open(os.path.join(outdir, "loci.fa.") + n, 'r', buffering=BUFFER_SIZE), 'fasta')
     for record in fa_seq:
         # ids of the form ENSMUST00000185852:1602:1618:+(+). Strip last 3 characters
         # Safely handle IDs that might be shorter than 3 characters
@@ -429,12 +436,14 @@ def hybridize_and_write(outdir, intarna_params, n, sample_name, compress=False):
     # Intermediate files are NOT compressed - only final merged files are compressed
     
     # Open files (intermediate files are always uncompressed)
+    # OPTIMIZATION: Use larger buffer size (2MB) for better I/O performance with large files
+    BUFFER_SIZE = 2 * 1024 * 1024  # 2MB buffer
     open_func = open
     open_mode_read = "r"
     open_mode_write = "w"
     
-    with open_func(file_chimeras, open_mode_read) as fh_chimeras, \
-         open_func(output_file, open_mode_write) as fh_out:
+    with open_func(file_chimeras, open_mode_read, buffering=BUFFER_SIZE) as fh_chimeras, \
+         open_func(output_file, open_mode_write, buffering=BUFFER_SIZE) as fh_out:
         for line in fh_chimeras:
             seq1 = seq2 = dotbracket = pos = energy = "NA"
             a = line.rstrip("\n").split("\t")
@@ -475,7 +484,9 @@ def parse_annotations(f_gtf):
     d_attributes['type'] = ['transcript_biotype', 'gene_biotype', 'Type']
 
     l_seen_exons = set()
-    with open(f_gtf) as gtf_handle:
+    # OPTIMIZATION: Use larger buffer size (2MB) for better I/O performance with large GTF files
+    BUFFER_SIZE = 2 * 1024 * 1024  # 2MB buffer
+    with open(f_gtf, "r", buffering=BUFFER_SIZE) as gtf_handle:
         # Chromosome seq level
         for rec in GFF.parse(gtf_handle, limit_info=limit_info, target_lines=1):
             # for each selected sub_feature
@@ -560,7 +571,9 @@ def parse_counts_file(crl_file, tpm_cutoff):
     l_loci_bed = set()
     prev_readid = None
     read_count = 0
-    with open(crl_file, "r") as fh_crl_file:
+    # OPTIMIZATION: Use larger buffer size (2MB) for better I/O performance with large CRL files
+    BUFFER_SIZE = 2 * 1024 * 1024  # 2MB buffer
+    with open(crl_file, "r", buffering=BUFFER_SIZE) as fh_crl_file:
         for line in fh_crl_file:
             f = line.rstrip('\n').split('\t')
             readid = '|'.join(f[0].split("|")[:-1])
@@ -614,17 +627,40 @@ def merge_files(inprefix, outfile, header, r, compress=False):
     # Write header first, then append sorted unique lines
     # This avoids shell escaping issues with header content
     # Final output file is compressed if requested (intermediate files are NOT compressed)
+    # OPTIMIZATION: Use larger buffer size (2MB) for better I/O performance with large files
+    # Note: gzip.open doesn't support buffering parameter, but Python's gzip module uses internal buffering
+    BUFFER_SIZE = 2 * 1024 * 1024  # 2MB buffer
     open_func = gzip.open if compress else open
     open_mode = "wt" if compress else "w"
     
-    with open_func(outfile, open_mode) as fh_out:
+    # Only apply buffering for uncompressed files (gzip.open handles buffering internally)
+    if compress:
+        fh_out = open_func(outfile, open_mode)
+    else:
+        fh_out = open_func(outfile, open_mode, buffering=BUFFER_SIZE)
+    
+    with fh_out:
         # Write header first
         fh_out.write(header + "\n")
         
         # Use shell commands to merge and sort files (more efficient for large files)
         # Intermediate files are uncompressed, so we can use cat directly
+        # OPTIMIZATION: Use parallel sort if available (GNU sort supports --parallel option)
+        # For systems with GNU sort >= 8.6, this can significantly speed up sorting large files
+        sort_cmd = "sort -u"
+        try:
+            # Check if GNU sort with --parallel is available (GNU sort >= 8.6)
+            result = subprocess.run(["sort", "--version"], capture_output=True, text=True, timeout=2)
+            if "GNU coreutils" in result.stdout:
+                # Use parallel sort - use number of processes that created the files
+                # This ensures we use appropriate parallelism for merging
+                sort_cmd = f"sort --parallel={r} -u"
+        except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError):
+            # Fall back to standard sort if check fails
+            pass
+        
         escaped_files = " ".join([f"'{f}'" for f in temp_files])
-        cmd = f"cat {escaped_files} | sort -u"
+        cmd = f"cat {escaped_files} | {sort_cmd}"
         
         # Execute command and write output to file
         process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, 
@@ -662,17 +698,26 @@ def hybridization_positions(dotbracket1, dotbracket2):
     return end1, end2
 
 
-def write_interaction_summary(outdir, sample_name, compress=False):
+def write_interaction_summary(outdir, sample_name, compress=False, num_threads=4):
     d_interactions = defaultdict(lambda: defaultdict(list))
     chimeras_file = os.path.join(outdir, sample_name + ".chimeras.txt")
     if compress:
         chimeras_file += ".gz"
     
     # Open file with gzip if compression is enabled
+    # OPTIMIZATION: Use larger buffer size (2MB) for better I/O performance with large files
+    # Note: gzip.open doesn't support buffering parameter, but Python's gzip module uses internal buffering
+    BUFFER_SIZE = 2 * 1024 * 1024  # 2MB buffer
     open_func = gzip.open if compress else open
     open_mode = "rt" if compress else "r"
     
-    with open_func(chimeras_file, open_mode) as fh_in:
+    # Only apply buffering for uncompressed files (gzip.open handles buffering internally)
+    if compress:
+        fh_in = open_func(chimeras_file, open_mode)
+    else:
+        fh_in = open_func(chimeras_file, open_mode, buffering=BUFFER_SIZE)
+    
+    with fh_in:
         next(fh_in)
         for line in fh_in:
             f = line.rstrip("\n").split("\t")
@@ -734,7 +779,9 @@ def write_interaction_summary(outdir, sample_name, compress=False):
                                      tpm1, tpm2, tpm, score1, score2, score])
             d_interactions[interaction]["common"] = [common_info]
 
-    with open(os.path.join(outdir, "interactions.temp"), "w") as fh_out:
+    # OPTIMIZATION: Use larger buffer size (2MB) for better I/O performance
+    BUFFER_SIZE = 2 * 1024 * 1024  # 2MB buffer
+    with open(os.path.join(outdir, "interactions.temp"), "w", buffering=BUFFER_SIZE) as fh_out:
         for interaction in d_interactions.keys():
             fh_out.write("\t".join([str(len(set(d_interactions[interaction]["readid"]))),
                                     interaction,
@@ -756,12 +803,28 @@ def write_interaction_summary(outdir, sample_name, compress=False):
         "annotation_region_locus_1", "annotation_region_locus_2",
         "reference_transcript_id_1", "reference_transcript_id_2"
     ])
-    os.system("sort -k 1nr,1 " + os.path.join(outdir, "interactions.temp") + " > " + os.path.join(outdir, "interactions.sorted"))
-    with open(os.path.join(outdir, sample_name + ".interactions.txt"), "w") as fh_out:
+    # OPTIMIZATION: Use parallel sort if available (GNU sort supports --parallel option)
+    # For systems with GNU sort >= 8.6, this can significantly speed up sorting large interaction files
+    sort_cmd = "sort -k 1nr,1"
+    try:
+        # Check if GNU sort with --parallel is available (GNU sort >= 8.6)
+        result = subprocess.run(["sort", "--version"], capture_output=True, text=True, timeout=2)
+        if "GNU coreutils" in result.stdout:
+            # Use parallel sort with specified number of threads
+            # Default to 4 threads, but can be overridden for better performance
+            sort_cmd = f"sort --parallel={max(1, num_threads)} -k 1nr,1"
+    except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError):
+        # Fall back to standard sort if check fails
+        pass
+    
+    os.system(sort_cmd + " " + os.path.join(outdir, "interactions.temp") + " > " + os.path.join(outdir, "interactions.sorted"))
+    # OPTIMIZATION: Use larger buffer size (2MB) for better I/O performance
+    BUFFER_SIZE = 2 * 1024 * 1024  # 2MB buffer
+    with open(os.path.join(outdir, sample_name + ".interactions.txt"), "w", buffering=BUFFER_SIZE) as fh_out:
         fh_out.write("# Note: To identify which locus is miRNA vs target, check the region1 and region2 fields.\n")
         fh_out.write("# miRNA annotations include: miRNA, 3p_mature_mir, 5p_mature_mir, mature_mir\n")
         fh_out.write(header_interactions + "\n")
-        with open(os.path.join(outdir, "interactions.sorted"), "r") as fh_in:
+        with open(os.path.join(outdir, "interactions.sorted"), "r", buffering=BUFFER_SIZE) as fh_in:
             for line in fh_in:
                 fh_out.write(line)
     os.remove(os.path.join(outdir, "interactions.temp"))
@@ -934,9 +997,11 @@ if __name__ == "__main__":
             l_ref = [args.ref_fasta1]
             if args.ref_fasta2:
                 l_ref.append(args.ref_fasta2)
-            with open(f_reference, 'w') as fh_out_ref:
+            # OPTIMIZATION: Use larger buffer size (2MB) for better I/O performance
+            BUFFER_SIZE = 2 * 1024 * 1024  # 2MB buffer
+            with open(f_reference, 'w', buffering=BUFFER_SIZE) as fh_out_ref:
                 for fname in l_ref:
-                    with open(fname) as infile:
+                    with open(fname, 'r', buffering=BUFFER_SIZE) as infile:
                         for lin in infile:
                             fh_out_ref.write(lin)
 
@@ -1041,5 +1106,5 @@ if __name__ == "__main__":
     merge_files(singletons_prefix, singletons_file, header_singletons, args.processes, args.compress)
     print(str(datetime.datetime.now()), " END: multiprocessing")
     if args.summarize:
-        write_interaction_summary(args.outdir, args.sample_name, args.compress)
+        write_interaction_summary(args.outdir, args.sample_name, args.compress, args.processes)
 
