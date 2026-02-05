@@ -9,7 +9,6 @@ import datetime
 import itertools
 import re
 import warnings
-from concurrent.futures import ThreadPoolExecutor, as_completed
 # Suppress Biopython deprecation warning from BCBio.GFF using UnknownSeq
 # The bcbiogff package (BCBio) internally uses UnknownSeq(length) which is deprecated
 # in newer Biopython versions in favor of Seq(None, length)
@@ -316,51 +315,7 @@ def merge_overlapping_intervals(d_desc, chrom, alignment_overlap_fraction):
     return t_merged, d_mergeddesc
 
 
-def _process_chromosome_overlap(chrom, chrom_data, alignment_overlap_fraction, min_locus_size):
-    """
-    Process a single chromosome for overlap-based merging.
-    Returns list of output lines for this chromosome.
-    """
-    t_merged, d_mergeddesc = merge_overlapping_intervals({chrom: chrom_data}, chrom, alignment_overlap_fraction)
-    output_lines = []
-    for pos in t_merged:
-        d_longest_alignments = defaultdict(int)
-        # choose per locus per transcript only one longest alignment
-        # First pass: find longest alignment per read/transcript
-        for alignment in d_mergeddesc[pos[0]]:
-            alignment_parts = alignment.split(',')
-            segmentid = alignment_parts[0]
-            transcriptid = alignment_parts[1]
-            start = int(alignment_parts[2])
-            end = int(alignment_parts[3])
-            # cutting out the segment id gives the read id
-            readid = '|'.join(segmentid.split('|')[:-1])
-            alignment_key = readid + "\t" + transcriptid
-            alignment_len = end - start
-            if alignment_len > d_longest_alignments[alignment_key]:
-                d_longest_alignments[alignment_key] = alignment_len
-        # Second pass: collect only longest alignments
-        l_alignments = []
-        for alignment in d_mergeddesc[pos[0]]:
-            alignment_parts = alignment.split(',')
-            segmentid = alignment_parts[0]
-            transcriptid = alignment_parts[1]
-            start = int(alignment_parts[2])
-            end = int(alignment_parts[3])
-            readid = '|'.join(segmentid.split('|')[:-1])
-            alignment_key = readid + "\t" + transcriptid
-            alignment_len = end - start
-            if alignment_len >= d_longest_alignments[alignment_key]:
-                l_alignments.append(alignment)
-        [chromid, strand] = chrom.split("\t")
-        # ignore locus if has not enough alignments
-        if len(l_alignments) < min_locus_size:
-            continue
-        output_lines.append("\t".join([chromid, str(pos[0]), str(pos[1]), strand, ";".join(sorted(l_alignments))]) + "\n")
-    return chrom, output_lines
-
-
-def merge_loci_overlap(outdir, alignment_overlap_fraction, min_locus_size, num_threads=1):
+def merge_loci_overlap(outdir, alignment_overlap_fraction, min_locus_size):
     f_bed = os.path.join(outdir, "segments.bed")
     # Merge the aligned loci
     d_desc = defaultdict(lambda: defaultdict(list))
@@ -376,72 +331,46 @@ def merge_loci_overlap(outdir, alignment_overlap_fraction, min_locus_size, num_t
 
     print(str(datetime.datetime.now()), "merging overlapping alignments")
     merged_bed = os.path.join(outdir, "merged.bed")
-    
-    # OPTIMIZATION: Process chromosomes in parallel when beneficial
-    # Each chromosome is independent, so parallelization is safe and effective
-    if num_threads > 1 and len(d_desc) > 10:  # Only parallelize if enough chromosomes
-        chrom_items = list(d_desc.items())
-        # Collect results in a dictionary to maintain order
-        chrom_results = {}
-        
-        with ThreadPoolExecutor(max_workers=num_threads) as executor:
-            futures = {executor.submit(_process_chromosome_overlap, chrom, chrom_data, 
-                                      alignment_overlap_fraction, min_locus_size): chrom 
-                      for chrom, chrom_data in chrom_items}
-            for future in as_completed(futures):
-                chrom, output_lines = future.result()
-                chrom_results[chrom] = output_lines
-        
-        # Write results in sorted order to maintain consistency
-        # OPTIMIZATION: Use larger buffer size (1MB) for I/O efficiency when writing large merged files
-        BUFFER_SIZE = 1024 * 1024  # 1MB buffer
-        with open(merged_bed, "w", buffering=BUFFER_SIZE) as fh_out:
-            for chrom in sorted(chrom_results.keys()):
-                for line in chrom_results[chrom]:
-                    fh_out.write(line)
-        d_desc.clear()
-    else:
-        # Sequential processing for small datasets or single thread
-        # OPTIMIZATION: Use larger buffer size (1MB) for I/O efficiency when writing large merged files
-        BUFFER_SIZE = 1024 * 1024  # 1MB buffer
-        with open(merged_bed, "w", buffering=BUFFER_SIZE) as fh_out:
-            for chrom in sorted(d_desc.keys()):
-                t_merged, d_mergeddesc = merge_overlapping_intervals(d_desc, chrom, alignment_overlap_fraction)
-                del d_desc[chrom]
-                for pos in t_merged:
-                    d_longest_alignments = defaultdict(int)
-                    # choose per locus per transcript only one longest alignment
-                    # First pass: find longest alignment per read/transcript
-                    for alignment in d_mergeddesc[pos[0]]:
-                        alignment_parts = alignment.split(',')
-                        segmentid = alignment_parts[0]
-                        transcriptid = alignment_parts[1]
-                        start = int(alignment_parts[2])
-                        end = int(alignment_parts[3])
-                        # cutting out the segment id gives the read id
-                        readid = '|'.join(segmentid.split('|')[:-1])
-                        alignment_key = readid + "\t" + transcriptid
-                        alignment_len = end - start
-                        if alignment_len > d_longest_alignments[alignment_key]:
-                            d_longest_alignments[alignment_key] = alignment_len
-                    # Second pass: collect only longest alignments
-                    l_alignments = []
-                    for alignment in d_mergeddesc[pos[0]]:
-                        alignment_parts = alignment.split(',')
-                        segmentid = alignment_parts[0]
-                        transcriptid = alignment_parts[1]
-                        start = int(alignment_parts[2])
-                        end = int(alignment_parts[3])
-                        readid = '|'.join(segmentid.split('|')[:-1])
-                        alignment_key = readid + "\t" + transcriptid
-                        alignment_len = end - start
-                        if alignment_len >= d_longest_alignments[alignment_key]:
-                            l_alignments.append(alignment)
-                    [chromid, strand] = chrom.split("\t")
-                    # ignore locus if has not enough alignments
-                    if len(l_alignments) < min_locus_size:
-                        continue
-                    fh_out.write("\t".join([chromid, str(pos[0]), str(pos[1]), strand, ";".join(sorted(l_alignments))]) + "\n")
+    # OPTIMIZATION: Use larger buffer size (1MB) for I/O efficiency when writing large merged files
+    BUFFER_SIZE = 1024 * 1024  # 1MB buffer
+    with open(merged_bed, "w", buffering=BUFFER_SIZE) as fh_out:
+        for chrom in sorted(d_desc.keys()):
+            t_merged, d_mergeddesc = merge_overlapping_intervals(d_desc, chrom, alignment_overlap_fraction)
+            del d_desc[chrom]
+            for pos in t_merged:
+                d_longest_alignments = defaultdict(int)
+                # choose per locus per transcript only one longest alignment
+                # First pass: find longest alignment per read/transcript
+                for alignment in d_mergeddesc[pos[0]]:
+                    alignment_parts = alignment.split(',')
+                    segmentid = alignment_parts[0]
+                    transcriptid = alignment_parts[1]
+                    start = int(alignment_parts[2])
+                    end = int(alignment_parts[3])
+                    # cutting out the segment id gives the read id
+                    readid = '|'.join(segmentid.split('|')[:-1])
+                    alignment_key = readid + "\t" + transcriptid
+                    alignment_len = end - start
+                    if alignment_len > d_longest_alignments[alignment_key]:
+                        d_longest_alignments[alignment_key] = alignment_len
+                # Second pass: collect only longest alignments
+                l_alignments = []
+                for alignment in d_mergeddesc[pos[0]]:
+                    alignment_parts = alignment.split(',')
+                    segmentid = alignment_parts[0]
+                    transcriptid = alignment_parts[1]
+                    start = int(alignment_parts[2])
+                    end = int(alignment_parts[3])
+                    readid = '|'.join(segmentid.split('|')[:-1])
+                    alignment_key = readid + "\t" + transcriptid
+                    alignment_len = end - start
+                    if alignment_len >= d_longest_alignments[alignment_key]:
+                        l_alignments.append(alignment)
+                [chromid, strand] = chrom.split("\t")
+                # ignore locus if has not enough alignments
+                if len(l_alignments) < min_locus_size:
+                    continue
+                fh_out.write("\t".join([chromid, str(pos[0]), str(pos[1]), strand, ";".join(sorted(l_alignments))]) + "\n")
     d_desc.clear()
     return
 
@@ -455,21 +384,8 @@ def write_merged_pos(d_mergeddesc, prev_chrom_strand, fh_out):
     d_mergeddesc.clear()
 
 
-def merge_loci_blockbuster(outdir, distance, min_cluster_height, min_block_height, scale, alignment_overlap_fraction, num_threads=1):
-    # OPTIMIZATION: Use parallel sort if available (GNU sort supports --parallel option)
-    # For systems with GNU sort >= 8.6, this can significantly speed up sorting large BED files
-    sort_cmd = "sort"
-    try:
-        # Check if GNU sort with --parallel is available (GNU sort >= 8.6)
-        result = subprocess.run(["sort", "--version"], capture_output=True, text=True, timeout=2)
-        if "GNU coreutils" in result.stdout:
-            # Use parallel sort with number of threads
-            sort_cmd = f"sort --parallel={num_threads}"
-    except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError):
-        # Fall back to standard sort if check fails
-        pass
-    
-    os.system(sort_cmd + " -k 1,1 -k 6,6 -k 2n,2 -k 3n,3 " + os.path.join(outdir, "segments.bed") + " > " +
+def merge_loci_blockbuster(outdir, distance, min_cluster_height, min_block_height, scale, alignment_overlap_fraction):
+    os.system("sort -k 1,1 -k 6,6 -k 2n,2 -k 3n,3 " + os.path.join(outdir, "segments.bed") + " > " +
               os.path.join(outdir, "segments.sorted.bed"))
     os.system("blockbuster.x " +
               " -distance " + str(distance) +
@@ -747,20 +663,9 @@ if __name__ == "__main__":
                         dest='min_locus_size',
                         help='Minimum number of alignments required per mered locus')
 
-    parser.add_argument('-t', '--threads', action='store', type=int, default=1, metavar='',
-                        dest='num_threads',
-                        help='Number of threads to use for parallel processing. Use 0 to use all available CPU cores. '
-                             'Default: 1 (single-threaded). Multi-threading is most beneficial for large datasets '
-                             'with many chromosomes.')
-
     parser.add_argument('-v', '--version', action='version', version='%(prog)s 1.4.4')
 
     args = parser.parse_args()
-    
-    # Handle num_threads <= 0 to use all available cores
-    if args.num_threads <= 0:
-        import multiprocessing
-        args.num_threads = multiprocessing.cpu_count()
 
     print('Input BED file                       : ' + args.bed)
     print('Output directory                     : ' + args.outdir)
@@ -783,7 +688,6 @@ if __name__ == "__main__":
         print('1st priority reference fasta file    : ' + args.ref_fasta1)
     if args.ref_fasta2:
         print('2nd priority reference fasta file    : ' + args.ref_fasta2)
-    print('Number of threads                    : ' + str(args.num_threads if args.num_threads > 0 else 'all available'))
     print("===================================================================")
 
     d_reflen1 = defaultdict()
@@ -815,10 +719,10 @@ if __name__ == "__main__":
     if args.block_based:
         chira_utilities.print_w_time("START: blockbuster based merging")
         merge_loci_blockbuster(args.outdir, args.distance, args.min_cluster_height, args.min_block_height,
-                               args.scale, args.alignment_overlap_fraction, args.num_threads)
+                               args.scale, args.alignment_overlap_fraction)
         chira_utilities.print_w_time("END: blockbuster based merging")
     else:
         chira_utilities.print_w_time("START: overlap based merging")
-        merge_loci_overlap(args.outdir, args.alignment_overlap_fraction, args.min_locus_size, args.num_threads)
+        merge_loci_overlap(args.outdir, args.alignment_overlap_fraction, args.min_locus_size)
         chira_utilities.print_w_time("END: overlap based merging")
 
