@@ -102,8 +102,16 @@ For complete details with line-by-line changes, please refer to [CHANGELOG.md](C
 
 **The easiest way to use ChiRA is with the provided container images**, which include all dependencies pre-installed:
 
+**Pre-built Docker Image Available:**
+A functional Docker image is available at: **`docker.io/nemat1976/chiraplus:v0.0.1`**
+
+This image includes all dependencies and is ready to use. Simply pull and run:
+
 **Docker:**
 ```bash
+# Pull the image (first time only)
+docker pull docker.io/nemat1976/chiraplus:v0.0.1
+
 # Run ChiRA commands
 docker run --rm -v $(pwd)/data:/app/data -v $(pwd)/output:/app/output \
   docker.io/nemat1976/chiraplus:v0.0.1 chira_collapse.py -i data/input.fastq -o output/collapsed.fasta
@@ -441,21 +449,26 @@ echo "Analysis complete! Results in extract/"
 
 ### Docker Workflow
 
-If using Docker, the workflow is similar but commands are prefixed with `docker run`:
+If using Docker, the workflow is similar but commands are prefixed with `docker run`. Use the pre-built image:
 
 ```bash
-# Build image once
-docker build -t chira:latest .
+# Pull the pre-built image (first time only)
+docker pull docker.io/nemat1976/chiraplus:v0.0.1
 
 # Run each step with volume mounts
 docker run --rm -v $(pwd)/data:/app/data -v $(pwd)/output:/app/output \
-  chira:latest python chira_collapse.py -i data/input.fastq -o output/collapsed.fasta
+  docker.io/nemat1976/chiraplus:v0.0.1 chira_collapse.py -i data/input.fastq -o output/collapsed.fasta
 
 docker run --rm -v $(pwd)/data:/app/data -v $(pwd)/output:/app/output \
-  chira:latest python chira_map.py -i output/collapsed.fasta -o output/mapping \
+  docker.io/nemat1976/chiraplus:v0.0.1 chira_map.py -i output/collapsed.fasta -o output/mapping \
   -f1 data/ref1.fasta -f2 data/ref2.fasta -b -a bwa
 
 # ... continue with remaining steps
+```
+
+**Note:** Alternatively, you can build the image from the provided Dockerfile:
+```bash
+docker build -t chira:latest .
 ```
 
 ---
