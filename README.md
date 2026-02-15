@@ -124,10 +124,12 @@ For detailed Singularity/Apptainer setup and usage instructions, see [SINGULARIT
 ### Docker Image Contents
 
 The Docker image includes:
-- **Python packages**: biopython, bcbiogff, pysam, requests, pyliftover
-- **Bioinformatics tools**: bwa, samtools, bedtools, intarna
+- **Python packages**: biopython, bcbiogff, pysam, requests, pyliftover, psutil
+- **Bioinformatics tools**: bwa, samtools, bedtools, gffread, intarna
 - **All ChiRA scripts and utilities**: Pre-installed and executable
 - **Environment setup**: Proper PATH and PYTHONPATH configuration
+
+**Note:** Optional tools (blockbuster, clan) are not included in the Docker image by default but can be added if needed for specific use cases.
 
 ### Running ChiRA in Docker
 
@@ -174,7 +176,13 @@ If you prefer to install dependencies manually:
 - bwa (recommended for alignment)
 - samtools
 - bedtools
+- gffread (for `extract_transcripts_from_genome.py`)
+  - Install with: `conda install -c bioconda gffread`
+  - Part of GFF utilities from Johns Hopkins University
+  - Documentation: https://ccb.jhu.edu/software/stringtie/gff.shtml#gffread
 - intarna (optional, for hybridization prediction)
+- blockbuster (optional, for block-based merging in `chira_merge.py`)
+- clan (optional, alternative aligner to BWA in `chira_map.py`)
 - **GNU coreutils** (for parallel sort support)
   - **Linux**: Usually pre-installed (GNU sort is standard)
   - **macOS**: Install via Homebrew: `brew install coreutils`
@@ -191,7 +199,11 @@ pip install psutil  # For automatic memory optimization, I/O bottleneck detectio
 pip install pyliftover  # For coordinate liftover in download_mirbase_gff3.py
 
 # Command-line tools
-conda install -c bioconda bwa samtools bedtools intarna
+conda install -c bioconda bwa samtools bedtools gffread intarna
+
+# Optional tools (for specific use cases)
+conda install -c bioconda blockbuster  # For block-based merging in chira_merge.py
+conda install -c bioconda clan  # Alternative aligner to BWA in chira_map.py
 
 # GNU coreutils (for parallel sort on macOS)
 # Linux: Usually pre-installed
@@ -242,9 +254,10 @@ download_mirbase_gff3.py -s hsa -o hsa_v21.gff3 --mirbase-version 21
 remove_mirna_hairpin_from_gtf.py -i ensembl_files/Homo_sapiens.GRCh38.110.gtf \
   -o target_transcriptome.gtf
 
-# Remove miRNA sequences from Ensembl cDNA FASTA
-remove_mirna_hairpin_from_fasta.py -g target_transcriptome.gtf \
-  -f ensembl_files/Homo_sapiens.GRCh38.cdna.all.fa \
+# Extract transcript sequences from genome FASTA using filtered GTF
+# This uses gffread to extract transcripts from the genome FASTA based on the filtered GTF
+extract_transcripts_from_genome.py -g target_transcriptome.gtf \
+  -f ensembl_files/Homo_sapiens.GRCh38.dna.primary_assembly.fa \
   -o target_transcriptome.fasta
 ```
 
@@ -253,12 +266,6 @@ remove_mirna_hairpin_from_fasta.py -g target_transcriptome.gtf \
 # Concatenate miRNA GTF with target GTF
 concatenate_gtf.py -m mature_mirna.gtf -t target_transcriptome.gtf \
   -o combined_annotation.gtf
-```
-
-**1.7 Combine cDNA and ncRNA FASTA files (optional):**
-```bash
-# Concatenate cDNA and ncRNA FASTA files (removes version numbers from transcript IDs)
-concatenate_fasta.py -c cdna.fasta -n ncrna.fasta -o combined_transcriptome.fasta
 ```
 
 **Result:** You now have:
@@ -397,8 +404,8 @@ download_ensembl.py -s homo_sapiens -g $ENSEMBL_VERSION -t $ENSEMBL_VERSION -o .
 # Remove miRNAs from target transcriptome
 remove_mirna_hairpin_from_gtf.py -i ensembl/Homo_sapiens.GRCh38.$ENSEMBL_VERSION.gtf \
   -o target_transcriptome.gtf
-remove_mirna_hairpin_from_fasta.py -g target_transcriptome.gtf \
-  -f ensembl/Homo_sapiens.GRCh38.cdna.all.fa -o ref2.fasta
+extract_transcripts_from_genome.py -g target_transcriptome.gtf \
+  -f ensembl/Homo_sapiens.GRCh38.dna.primary_assembly.fa -o ref2.fasta
 
 # Combine annotations (if you have miRNA GTF)
 # concatenate_gtf.py -m mature_mirna.gtf -t target_transcriptome.gtf -o combined.gtf
@@ -877,6 +884,7 @@ download_ensembl.py -s homo_sapiens -g 110 -t 110 -o ./ensembl_files
 - Downloads from specific miRBase version or CURRENT
 - Extracts sequences by species code
 - Handles gzipped files automatically
+- **Automatically converts U (uracil) to T (thymine)** in sequences for ChiRA compatibility (ChiRA expects DNA sequences)
 
 **Required Inputs:**
 - `-s, --species`: Species code (e.g., hsa=human, mmu=mouse, bta=bovine, rno=rat)
@@ -955,34 +963,6 @@ download_mirbase_gff3.py -s hsa -o hsa_processed.gff3 \
 
 ---
 
-### concatenate_fasta.py
-
-**Description:** Concatenates cDNA and ncRNA FASTA files into a single output file, removing version numbers from transcript IDs in the headers.
-
-**Key Features:**
-- Combines cDNA and ncRNA FASTA files
-- Removes version numbers from transcript IDs (e.g., `ENST00000123456.1` → `ENST00000123456`)
-- Supports both Ensembl style (space-separated) and GENCODE style (pipe-separated) headers
-- At least one input file (cDNA or ncRNA) must be provided
-
-**Required Inputs:**
-- `-o, --output`: Output concatenated FASTA file
-
-**Optional Parameters:**
-- `-c, --cdna`: Input cDNA FASTA file (optional, but at least one input must be provided)
-- `-n, --ncrna`: Input ncRNA FASTA file (optional, but at least one input must be provided)
-
-**Usage Example:**
-```bash
-# Concatenate both cDNA and ncRNA
-concatenate_fasta.py -c cdna.fasta -n ncrna.fasta -o combined_transcriptome.fasta
-
-# Concatenate only cDNA
-concatenate_fasta.py -c cdna.fasta -o combined.fasta
-```
-
----
-
 ### remove_mirna_hairpin_from_gtf.py
 
 **Description:** Removes microRNA entries from an Ensembl GTF file. Used for preparing target-only transcriptome annotations.
@@ -1009,41 +989,52 @@ remove_mirna_hairpin_from_gtf.py -i annotation.gtf -o annotation_no_mirna.gtf
 
 ---
 
-### remove_mirna_hairpin_from_fasta.py
+### extract_transcripts_from_genome.py
 
-**Description:** Removes miRNA FASTA records from a transcriptome FASTA file using transcript IDs extracted from a GTF file.
+**Description:** Extracts transcript FASTA sequences from a genome FASTA file using gffread based on a filtered GTF file.
+
+This script uses gffread (from [GFF utilities](https://ccb.jhu.edu/software/stringtie/gff.shtml#gffread)) to extract transcript sequences directly from the genome FASTA file based on transcript features in a filtered GTF file (e.g., output from `remove_mirna_hairpin_from_gtf.py`). This approach is more accurate than filtering pre-extracted transcript sequences, as it extracts sequences directly from the genome coordinates.
 
 **Key Features:**
-- Uses transcript IDs from GTF to identify miRNA sequences
-- Supports various FASTA header formats
-- Reuses miRNA detection logic from `remove_mirna_hairpin_from_gtf.py`
+- Uses gffread to extract transcript sequences from genome FASTA
+- Works with filtered GTF files (e.g., miRNA-removed GTF from `remove_mirna_hairpin_from_gtf.py`)
+- Produces transcriptome FASTA without miRNA sequences (if GTF was filtered)
+- Automatically validates that gffread is available
 
 **Required Inputs:**
-- `-g, --gtf`: Input GTF file (Ensembl format)
-- `-f, --fasta`: Input transcriptome FASTA file
-- `-o, --output`: Output FASTA file (without microRNA sequences)
+- `-g, --gtf`: Filtered GTF file (e.g., output from `remove_mirna_hairpin_from_gtf.py`)
+- `-f, --genome-fasta`: Genome FASTA file (e.g., primary assembly from Ensembl)
+- `-o, --output`: Output transcript FASTA file
 
-**Optional Parameters:**
-- `-p, --pattern`: Regular expression pattern for matching miRNA in GTF attributes (same as `remove_mirna_hairpin_from_gtf.py`)
+**Dependencies:**
+- Requires `gffread` (available via conda: `conda install -c bioconda gffread`)
+- gffread is part of the GFF utilities package from Johns Hopkins University
 
 **Usage Example:**
 ```bash
-remove_mirna_hairpin_from_fasta.py -g annotation.gtf -f transcriptome.fasta -o transcriptome_no_mirna.fasta
+# Extract transcripts from genome using filtered GTF (without miRNAs)
+extract_transcripts_from_genome.py -g target_transcriptome.gtf \
+  -f Homo_sapiens.GRCh38.dna.primary_assembly.fa \
+  -o target_transcriptome.fasta
 ```
+
+**Note:** This script replaces the previous `remove_mirna_hairpin_from_fasta.py` approach. Instead of filtering pre-extracted transcript sequences, it extracts sequences directly from the genome FASTA based on the filtered GTF coordinates, ensuring accuracy and completeness.
 
 ---
 
 ### concatenate_gtf.py
 
-**Description:** Concatenates mature miRNA GTF file with target transcriptome GTF file, removing comment lines from the miRNA GTF.
+**Description:** Concatenates mature miRNA GTF/GFF3 file with target transcriptome GTF file, removing comment lines from the miRNA GTF.
 
 **Key Features:**
 - Combines miRNA and target GTF files for split-reference analysis
 - Removes comment lines from miRNA GTF
 - Optionally removes comment lines from target GTF
+- Note: miRBase provides GFF3 format, which ChiRA can handle directly. This script accepts GTF format.
 
 **Required Inputs:**
-- `-m, --mirna-gtf`: Mature miRNA GTF file (can be converted from miRBase GFF3 if needed)
+- `-m, --mirna-gtf`: Mature miRNA GTF/GFF3 file (e.g., from miRBase via `download_mirbase_gff3.py`)
+  - Note: miRBase GFF3 format can be used directly with ChiRA. This script accepts GTF format.
 - `-t, --target-gtf`: Target transcriptome GTF file (output from `remove_mirna_hairpin_from_gtf.py`)
 - `-o, --output`: Output combined GTF file
 

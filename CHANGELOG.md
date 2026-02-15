@@ -5,6 +5,52 @@ All notable changes to ChiRA will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.7] - 2026-02-15
+
+### Added
+- **extract_transcripts_from_genome.py** (new utility script):
+  - Created script to extract transcript FASTA sequences from genome FASTA using gffread
+  - Uses gffread (from [GFF utilities](https://ccb.jhu.edu/software/stringtie/gff.shtml#gffread)) to extract sequences based on GTF coordinates
+  - Replaces `remove_mirna_hairpin_from_fasta.py` with a more accurate approach
+  - Extracts sequences directly from genome FASTA, ensuring accuracy and completeness
+  - Automatically validates gffread availability and provides installation instructions
+  - Parameters: `-g, --gtf` (filtered GTF file), `-f, --genome-fasta` (genome FASTA), `-o, --output` (output transcript FASTA)
+
+- **Dockerfile**:
+  - Added `gffread` package for transcript extraction functionality
+
+### Changed
+- **download_mirbase_mature.py**:
+  - Added automatic conversion of U (uracil) to T (thymine) in mature miRNA sequences
+  - Ensures compatibility with ChiRA analysis, which expects DNA sequences (with T) rather than RNA sequences (with U)
+  - Conversion applied to both uppercase and lowercase nucleotides when writing sequences
+
+- **concatenate_gtf.py**:
+  - Updated documentation to reflect that miRBase GFF3 format can be used directly with ChiRA
+  - Updated docstring and help text to clarify that miRBase GFF3 files don't need conversion to GTF format
+  - Updated parameter descriptions to mention GFF3 format support
+
+- **Dockerfile**:
+  - Added `gffread` to conda packages for transcript extraction functionality
+  - Updated package list to include all required dependencies
+
+- **README.md**:
+  - Updated workflow examples to use `extract_transcripts_from_genome.py` instead of `remove_mirna_hairpin_from_fasta.py`
+  - Updated to use genome FASTA (primary assembly) instead of cDNA FASTA for transcript extraction
+  - Added documentation for `extract_transcripts_from_genome.py` utility script
+  - Updated `download_mirbase_mature.py` documentation to mention U→T conversion
+  - Updated `concatenate_gtf.py` documentation to mention GFF3 format support
+  - Updated Docker image contents and installation instructions to include `gffread`
+
+### Removed
+- **remove_mirna_hairpin_from_fasta.py**:
+  - Removed script (replaced by `extract_transcripts_from_genome.py`)
+  - New approach extracts sequences directly from genome FASTA using gffread, which is more accurate than filtering pre-extracted sequences
+
+- **concatenate_fasta.py**:
+  - Removed utility script (no longer needed)
+  - Users can manually concatenate FASTA files using standard Unix tools (e.g., `cat`) if needed
+
 ## [1.4.6] - 2026-02-15
 
 ### Added
