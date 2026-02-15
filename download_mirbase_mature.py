@@ -78,6 +78,9 @@ def extract_species_mirnas(input_file, output_file, species_code):
     """
     Extract species-specific mature miRNA sequences from miRBase FASTA file.
     
+    Converts all "U" (uracil) nucleotides to "T" (thymine) to be compatible with
+    ChiRA analysis, which expects DNA sequences rather than RNA sequences.
+    
     Args:
         input_file: Path to input FASTA file (uncompressed)
         output_file: Path to output FASTA file (species-specific sequences)
@@ -99,7 +102,9 @@ def extract_species_mirnas(input_file, output_file, species_code):
                 if line.startswith('>'):
                     # Write previous sequence if it was species-specific
                     if in_species_sequence and current_header and current_sequence:
-                        fh_out.write(f"{current_header}\n{''.join(current_sequence)}\n")
+                        # Convert U to T in sequence (both uppercase and lowercase)
+                        sequence_str = ''.join(current_sequence).replace('U', 'T').replace('u', 't')
+                        fh_out.write(f"{current_header}\n{sequence_str}\n")
                         sequence_count += 1
                     
                     # Check if this header is for the target species
@@ -112,7 +117,9 @@ def extract_species_mirnas(input_file, output_file, species_code):
             
             # Write last sequence if it was species-specific
             if in_species_sequence and current_header and current_sequence:
-                fh_out.write(f"{current_header}\n{''.join(current_sequence)}\n")
+                # Convert U to T in sequence (both uppercase and lowercase)
+                sequence_str = ''.join(current_sequence).replace('U', 'T').replace('u', 't')
+                fh_out.write(f"{current_header}\n{sequence_str}\n")
                 sequence_count += 1
         
         return sequence_count

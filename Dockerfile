@@ -30,10 +30,14 @@ RUN apt-get update && \
         pysam \
         requests \
         pyliftover \
+        psutil \
         bwa \
         samtools \
         bedtools \
+        gffread \
         intarna \
+        blockbuster \
+        clan \
         && \
     micromamba clean -afy && \
     # Create symlinks for ALL conda binaries in /usr/local/bin so they're always in PATH

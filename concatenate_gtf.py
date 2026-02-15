@@ -1,12 +1,13 @@
 #!/usr/bin/env python
 """
-Concatenate mature miRNA GTF file with target transcriptome GTF file.
+Concatenate mature miRNA GTF/GFF3 file with target transcriptome GTF file.
 
 This script combines:
-1. Mature miRNA GTF file (output from gff3_to_gtf.py) - with comment lines removed
+1. Mature miRNA GTF/GFF3 file (e.g., from miRBase via download_mirbase_gff3.py) - with comment lines removed
+   Note: miRBase provides GFF3 format, which ChiRA can handle directly. This script accepts GTF format.
 2. Target transcriptome GTF file (output from remove_mirna_hairpin_from_gtf.py) - with miRNA hairpins removed
 
-The output is a combined GTF file suitable for use as ref2.fasta annotation in split-reference analysis.
+The output is a combined GTF file suitable for use as annotation file in ChiRA analysis.
 """
 
 import argparse
@@ -16,10 +17,11 @@ import re
 
 def concatenate_gtf_files(mirna_gtf, target_gtf, output_gtf, keep_target_comments=True):
     """
-    Concatenate mature miRNA GTF with target transcriptome GTF.
+    Concatenate mature miRNA GTF/GFF3 with target transcriptome GTF.
     
     Args:
-        mirna_gtf: Path to mature miRNA GTF file (from gff3_to_gtf.py)
+        mirna_gtf: Path to mature miRNA GTF/GFF3 file (e.g., from miRBase via download_mirbase_gff3.py)
+                   Note: miRBase provides GFF3 format, which ChiRA can handle directly. This script accepts GTF format.
         target_gtf: Path to target transcriptome GTF file (with miRNA hairpins removed)
         output_gtf: Path to output combined GTF file
         keep_target_comments: If True, keep comment lines from target GTF (default: True)
@@ -72,13 +74,13 @@ def concatenate_gtf_files(mirna_gtf, target_gtf, output_gtf, keep_target_comment
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description='Concatenate mature miRNA GTF file with target transcriptome GTF file',
+        description='Concatenate mature miRNA GTF/GFF3 file with target transcriptome GTF file',
         usage='%(prog)s [-h] [-v,--version]',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     
     parser.add_argument('-m', '--mirna-gtf', action='store', dest='mirna_gtf', required=True,
-                        metavar='', help='Mature miRNA GTF file (output from gff3_to_gtf.py)')
+                        metavar='', help='Mature miRNA GTF/GFF3 file (e.g., from miRBase via download_mirbase_gff3.py). Note: miRBase GFF3 format can be used directly with ChiRA.')
     parser.add_argument('-t', '--target-gtf', action='store', dest='target_gtf', required=True,
                         metavar='', help='Target transcriptome GTF file (output from remove_mirna_hairpin_from_gtf.py)')
     parser.add_argument('-o', '--output', action='store', dest='output_gtf', required=True,

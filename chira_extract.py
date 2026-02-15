@@ -831,7 +831,8 @@ def write_interaction_summary(outdir, sample_name, compress=False, num_threads=4
     os.remove(os.path.join(outdir, "interactions.sorted"))
 
 
-if __name__ == "__main__":
+def parse_arguments():
+    """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description='Chimeric Read Annotator: extract chimeras',
                                      usage='%(prog)s [-h] [-v,--version]',
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -911,8 +912,23 @@ if __name__ == "__main__":
 
     parser.add_argument('-v', '--version', action='version', version='%(prog)s 1.4.4')
 
-    args = parser.parse_args()
+    return parser.parse_args()
 
+
+def validate_arguments(args):
+    """Validate command-line arguments."""
+    if args.hybridize and args.f_gtf and not args.f_ref:
+        sys.stderr.write("Need the reference fasta file to hybridize. Make sure to provide the genomic fasta file"
+                         " in case you already provided a GTF file.\n")
+        sys.exit(1)
+
+    if args.temperature < 0 or args.temperature > 100:
+        sys.stderr.write("IntaRNA tempertature must be between 0 and 100!\n")
+        sys.exit(1)
+
+
+def print_configuration(args):
+    """Print configuration parameters."""
     print('CRL file                             : ' + args.crl_file)
     print('Output directory                     : ' + args.outdir)
     if args.f_gtf:
@@ -933,32 +949,21 @@ if __name__ == "__main__":
     print('Compress output files with gzip        : ' + str(args.compress))
     print("===================================================================")
 
-    if args.hybridize and args.f_gtf and not args.f_ref:
-        sys.stderr.write("Need the reference fasta file to hybridize. Make sure to provide the genomic fasta file"
-                         " in case you already provided a GTF file.\n")
-        sys.exit(1)
 
-    if args.temperature < 0 or args.temperature > 100:
-        sys.stderr.write("IntaRNA tempertature must be between 0 and 100!\n")
-        sys.exit(1)
-    if args.f_gtf:
-        # Parse the annotations and save them to dictionaries. Additionally write exons bed files to the outputdir
-        print("Parsing the annotation file")
-        parse_annotations(args.f_gtf)
-
+def setup_references(args):
+    """Extract reference lengths from fasta files."""
     d_reflen1 = defaultdict()
     d_reflen2 = defaultdict()
-    # extract lengths of references from the reference fasta files, keys are reference ids used to find chimeric reads
     chira_utilities.extract_reflengths(args.ref_fasta1, d_reflen1)
     if args.ref_fasta2:
         chira_utilities.extract_reflengths(args.ref_fasta2, d_reflen2)
+    return d_reflen1, d_reflen2
 
-    print("Parsing CRLs file")
-    no_of_reads, tpm_cutoff_value = parse_counts_file(args.crl_file, args.tpm_cutoff)
-    print("Done")
 
+def run_chimera_extraction(args, d_reflen1, d_reflen2, tpm_cutoff_value, no_of_reads):
+    """Run multiprocessing for chimera extraction."""
     print(str(datetime.datetime.now()), " START: multiprocessing")
-
+    
     jobs = []
     # write chimeric reads
     for k in range(args.processes):
@@ -975,84 +980,107 @@ if __name__ == "__main__":
     for j in jobs:
         j.join()
 
-    # file name prefixes
+
+def prepare_reference_file(args):
+    """Prepare reference fasta file for hybridization."""
+    if args.f_ref:
+        return args.f_ref
+    else:
+        f_reference = os.path.join(args.outdir, 'merged_reference.fa')
+        l_ref = [args.ref_fasta1]
+        if args.ref_fasta2:
+            l_ref.append(args.ref_fasta2)
+        # OPTIMIZATION: Use larger buffer size (2MB) for better I/O performance
+        BUFFER_SIZE = 2 * 1024 * 1024  # 2MB buffer
+        with open(f_reference, 'w', buffering=BUFFER_SIZE) as fh_out_ref:
+            for fname in l_ref:
+                with open(fname, 'r', buffering=BUFFER_SIZE) as infile:
+                    for lin in infile:
+                        fh_out_ref.write(lin)
+        return f_reference
+
+
+def extract_loci_sequences(args, f_reference):
+    """Extract FASTA sequences for loci using bedtools getfasta."""
+    for k in range(args.processes):
+        bed = os.path.join(args.outdir, "loci.bed.") + str(k)
+        fa = os.path.join(args.outdir, "loci.fa.") + str(k)
+        getfasta_cmd = chira_utilities.get_bedtools_command('getfasta')
+        process = subprocess.Popen(getfasta_cmd + ['-s', '-nameOnly',
+                                    '-fi', f_reference,
+                                    '-bed', bed,
+                                    '-fo', fa],
+                                   stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT,
+                                   universal_newlines=True)
+        for l in sorted(set(process.stdout.readlines())):
+            print(l, end="")
+
+
+def build_intarna_params(args):
+    """Build common IntaRNA parameters string."""
+    noseed_param = ""
+    if args.no_seed:
+        noseed_param = "--noSeed"
+    return " ".join(["--outMode C", "--outCsvCols id1,start1,start2,hybridDPfull,E",
+                     noseed_param, "-m", args.intarna_mode, "--acc", args.accessibility,
+                     "--temperature", str(args.temperature), "--seedBP", str(args.seed_bp),
+                     "--seedMinPu", str(args.seed_min_pu), "--accW", str(args.acc_width)])
+
+
+def run_hybridization(args):
+    """Run hybridization process if enabled."""
+    chimeras_prefix = os.path.join(args.outdir, args.sample_name + ".chimeras-r")
+    f_reference = prepare_reference_file(args)
+    
+    # Extract FASTA sequences for loci
+    extract_loci_sequences(args, f_reference)
+    
+    # Build IntaRNA parameters
+    common_intarna_params = build_intarna_params(args)
+    
+    # Run hybridization in parallel
+    jobs = []
+    for k in range(args.processes):
+        j = Process(target=hybridize_and_write, args=(args.outdir, common_intarna_params, str(k), args.sample_name, args.compress))
+        jobs.append(j)
+
+    for j in jobs:
+        j.start()
+    for j in jobs:
+        j.join()
+
+    # Cleanup intermediate files
+    for k in range(args.processes):
+        os.remove(os.path.join(args.outdir, "loci.fa.") + str(k))
+        os.remove(os.path.join(args.outdir, "loci.bed.") + str(k))
+
+    # Remove temporary reference file if we created it
+    if not args.f_ref:
+        if os.path.exists(f_reference):
+            os.remove(f_reference)
+        if os.path.exists(f_reference + ".fai"):
+            os.remove(f_reference + ".fai")
+    
+    return chimeras_prefix
+
+
+def merge_output_files(args, chimeras_prefix):
+    """Merge output files from multiple processes."""
+    # File name prefixes
+    if not args.hybridize:
+        chimeras_prefix = os.path.join(args.outdir, args.sample_name + ".chimeras")
+    
     chimeras_file = os.path.join(args.outdir, args.sample_name + ".chimeras.txt")
     singletons_file = os.path.join(args.outdir, args.sample_name + ".singletons.txt")
+    singletons_prefix = os.path.join(args.outdir, args.sample_name + ".singletons")
+    
     # Add .gz extension if compression is enabled
     if args.compress:
         chimeras_file += ".gz"
         singletons_file += ".gz"
     
-    chimeras_prefix = os.path.join(args.outdir, args.sample_name + ".chimeras")
-    singletons_prefix = os.path.join(args.outdir, args.sample_name + ".singletons")
-
-    # if hybridization required
-    if args.hybridize:
-        chimeras_prefix = os.path.join(args.outdir, args.sample_name + ".chimeras-r")
-        f_reference = "NA"
-        if args.f_ref:
-            f_reference = args.f_ref
-        else:
-            f_reference = os.path.join(args.outdir, 'merged_reference.fa')
-            l_ref = [args.ref_fasta1]
-            if args.ref_fasta2:
-                l_ref.append(args.ref_fasta2)
-            # OPTIMIZATION: Use larger buffer size (2MB) for better I/O performance
-            BUFFER_SIZE = 2 * 1024 * 1024  # 2MB buffer
-            with open(f_reference, 'w', buffering=BUFFER_SIZE) as fh_out_ref:
-                for fname in l_ref:
-                    with open(fname, 'r', buffering=BUFFER_SIZE) as infile:
-                        for lin in infile:
-                            fh_out_ref.write(lin)
-
-        for k in range(args.processes):
-            # before starting hybridization, extract fasta sequences
-            # do not run them in parallel as they need a lot memory
-            bed = os.path.join(args.outdir, "loci.bed.") + str(k)
-            fa = os.path.join(args.outdir, "loci.fa.") + str(k)
-            # loci.bed should exist already, now extract loci sequences
-            getfasta_cmd = chira_utilities.get_bedtools_command('getfasta')
-            process = subprocess.Popen(getfasta_cmd + ['-s', '-nameOnly',
-                                        '-fi', f_reference,
-                                        '-bed', bed,
-                                        '-fo', fa],
-                                       stdout=subprocess.PIPE,
-                                       stderr=subprocess.STDOUT,
-                                       universal_newlines=True)
-            for l in sorted(set(process.stdout.readlines())):
-                print(l, end="")
-
-        noseed_param = ""
-        if args.no_seed:
-            noseed_param = "--noSeed"
-        common_intarna_params = " ".join(["--outMode C", "--outCsvCols id1,start1,start2,hybridDPfull,E",
-                                          noseed_param, "-m", args.intarna_mode, "--acc", args.accessibility,
-                                          "--temperature", str(args.temperature), "--seedBP", str(args.seed_bp),
-                                          "--seedMinPu", str(args.seed_min_pu), "--accW", str(args.acc_width)])
-        jobs = []
-        # hybridize chimeric reads
-        for k in range(args.processes):
-            j = Process(target=hybridize_and_write, args=(args.outdir, common_intarna_params, str(k), args.sample_name, args.compress))
-            jobs.append(j)
-
-        for j in jobs:
-            j.start()
-        for j in jobs:
-            j.join()
-
-        for k in range(args.processes):
-            os.remove(os.path.join(args.outdir, "loci.fa.") + str(k))
-            os.remove(os.path.join(args.outdir, "loci.bed.") + str(k))
-
-        # remove the temporary reference file
-        if not args.f_ref:
-            if os.path.exists(f_reference):
-                os.remove(f_reference)
-            if os.path.exists(f_reference + ".fai"):
-                os.remove(f_reference + ".fai")
-
-    # cleanup intermediate files
-    # header fields
+    # Header fields
     header_chimeras = "\t".join(["read_id",
                                  "transcript_id_1",
                                  "transcript_id_2",
@@ -1088,6 +1116,7 @@ if __name__ == "__main__":
                                  "hybridization_mfe_kcal_mol",
                                  "mirna_read_position"])
     merge_files(chimeras_prefix, chimeras_file, header_chimeras, args.processes, args.compress)
+    
     header_singletons = "\t".join(["read_id",
                                    "transcript_id",
                                    "gene_id",
@@ -1104,7 +1133,45 @@ if __name__ == "__main__":
                                    "tpm",
                                    "alignment_score"])
     merge_files(singletons_prefix, singletons_file, header_singletons, args.processes, args.compress)
+
+
+def main():
+    """Main function to orchestrate the chimera extraction workflow."""
+    args = parse_arguments()
+    print_configuration(args)
+    validate_arguments(args)
+
+    # Parse annotations if GTF file provided
+    if args.f_gtf:
+        print("Parsing the annotation file")
+        parse_annotations(args.f_gtf)
+
+    # Setup references
+    d_reflen1, d_reflen2 = setup_references(args)
+
+    # Parse CRLs file
+    print("Parsing CRLs file")
+    no_of_reads, tpm_cutoff_value = parse_counts_file(args.crl_file, args.tpm_cutoff)
+    print("Done")
+
+    # Run chimera extraction
+    run_chimera_extraction(args, d_reflen1, d_reflen2, tpm_cutoff_value, no_of_reads)
+
+    # Run hybridization if enabled (returns chimeras prefix)
+    chimeras_prefix = None
+    if args.hybridize:
+        chimeras_prefix = run_hybridization(args)
+
+    # Merge output files
+    merge_output_files(args, chimeras_prefix)
+    
     print(str(datetime.datetime.now()), " END: multiprocessing")
+    
+    # Write interaction summary if requested
     if args.summarize:
         write_interaction_summary(args.outdir, args.sample_name, args.compress, args.processes)
+
+
+if __name__ == "__main__":
+    main()
 
