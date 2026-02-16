@@ -899,12 +899,18 @@ def setup_dask_cluster(args, num_chunks):
         if conda_env:
             print(f"      Conda environment: {conda_env}", file=sys.stderr)
         
-        # Create LSF cluster
+        # Create LSF cluster with identifiable job names
+        # Generate unique job name based on output directory and timestamp
+        import time
+        job_name_prefix = f"chira_dask_{os.path.basename(args.outdir)}_{int(time.time())}"
+        job_name_prefix = job_name_prefix[:30]  # LSF job names limited to ~30 chars
+        
         cluster_kwargs = {
             'queue': args.dask_queue,
             'cores': cores_per_worker,
             'memory': memory_per_worker,
             'walltime': args.dask_walltime,
+            'job_name': job_name_prefix,  # Custom job name for visibility in bjobs
             'job_extra_directives': [
                 f'#BSUB -R "span[hosts=1]"',  # All processes on same host
             ],
@@ -924,6 +930,9 @@ def setup_dask_cluster(args, num_chunks):
         client = Client(cluster)
         
         print(f"INFO: Dask cluster dashboard available at: {client.dashboard_link}", file=sys.stderr)
+        print(f"INFO: Dask worker jobs submitted with name prefix: {job_name_prefix}", file=sys.stderr)
+        print(f"      View jobs with: bjobs -J {job_name_prefix}*", file=sys.stderr)
+        print(f"      Or view all your jobs: bjobs -u $USER", file=sys.stderr)
         print(f"      Waiting for {num_workers} workers to start...", file=sys.stderr)
         
         # Wait for workers to be ready (with timeout)
@@ -939,6 +948,8 @@ def setup_dask_cluster(args, num_chunks):
         ready_workers = len(client.scheduler_info()['workers'])
         if ready_workers < num_workers:
             print(f"WARNING: Only {ready_workers}/{num_workers} workers started within timeout.", file=sys.stderr)
+            print(f"         Check job status: bjobs -J {job_name_prefix}*", file=sys.stderr)
+            print(f"         Check cluster logs in {cluster_kwargs['log_directory']}", file=sys.stderr)
             print(f"         Proceeding with {ready_workers} workers.", file=sys.stderr)
         else:
             print(f"INFO: All {ready_workers} workers ready!", file=sys.stderr)
