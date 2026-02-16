@@ -35,24 +35,49 @@ chunk_dir <- config$chunk_dir
 alignment_job_types_json <- config$alignment_job_types_json
 per_chunk_processes <- config$per_chunk_processes
 job_name_prefix <- config$job_name_prefix
+max_parallel <- ifelse(is.null(config$max_parallel), nrow(chunks), config$max_parallel)
 
 # Create batchtools registry
+# Remove existing directory if it exists (following InPAS pattern)
 if (dir.exists(reg_dir)) {
-  unlink(reg_dir, recursive = TRUE)
+  unlink(reg_dir, recursive = TRUE, force = TRUE)
 }
-reg <- makeRegistry(file.dir = reg_dir, work.dir = getwd())
+# Create registry (following InPAS pattern: conf.file = NA, seed = 1)
+reg <- makeRegistry(
+  file.dir = reg_dir,
+  conf.file = NA,
+  work.dir = getwd(),
+  seed = 1
+)
 
 # Configure LSF cluster functions
-# Uses built-in "lsf-simple" template by default
-# If you need a custom template, create a file and specify its path here
-# Example: template = "/path/to/custom_lsf.tmpl"
-reg$cluster.functions <- makeClusterFunctionsLSF(
-  template = "lsf-simple",  # Built-in template - works for most LSF setups
-  nodename = "localhost"    # Hostname where LSF scheduler runs
-  # For most clusters: keep as "localhost" (you submit from login node)
-  # Only change if: LSF runs on a different host, or cluster docs specify otherwise
-  # To auto-detect: nodename = Sys.info()["nodename"]
-)
+# Python passes absolute path to template_file, or NULL/empty if using default
+template_file <- if (is.null(config$template_file) || config$template_file == "") {
+  # Default: look for lsf_custom.tmpl in current directory (where R script runs)
+  # Python should have set this, but fallback here for safety
+  default_template <- "lsf_custom.tmpl"
+  if (file.exists(default_template)) {
+    normalizePath(default_template)  # Use absolute path
+  } else {
+    "lsf-simple"  # Fallback to built-in
+  }
+} else {
+  # Use template file path from Python (should be absolute path)
+  config$template_file
+}
+
+# Configure LSF cluster functions (following InPAS pattern with latency settings)
+# InPAS uses: makeClusterFunctionsLSF(template = template_file, scheduler.latency = 1, fs.latency = 65)
+if (template_file == "lsf-simple" || file.exists(template_file)) {
+  reg$cluster.functions <- makeClusterFunctionsLSF(
+    template = template_file,
+    scheduler.latency = 1,  # Latency for scheduler operations (seconds) - from InPAS
+    fs.latency = 65         # Latency for filesystem operations (seconds) - from InPAS
+  )
+  cat(sprintf("Using LSF template: %s\n", template_file))
+} else {
+  stop(sprintf("Template file '%s' does not exist. Use --batchtools_template to specify a valid template file.", template_file))
+}
 
 # Define job function
 process_chunk_job <- function(chunk_file, chunk_idx, chunk_dir, 
@@ -81,13 +106,31 @@ process_chunk_job <- function(chunk_file, chunk_idx, chunk_dir,
 
 # Submit jobs
 cat(sprintf("Submitting %d chunk jobs to LSF cluster...\n", nrow(chunks)))
+if (max_parallel < nrow(chunks)) {
+  cat(sprintf("NOTE: max_parallel=%d limits concurrent RUNNING jobs. Jobs will be submitted in batches of %d.\n", max_parallel, max_parallel))
+  cat(sprintf("      The script will wait for each batch to complete before submitting the next batch.\n"))
+  cat(sprintf("      This ensures only %d jobs are running at any time.\n", max_parallel))
+} else {
+  cat(sprintf("NOTE: No max_parallel limit. All %d jobs will be submitted at once.\n", nrow(chunks)))
+}
 
 # Prepare job resources
+# Convert walltime from "HH:MM" format to seconds (batchtools expects seconds)
+walltime_seconds <- if (grepl(":", walltime)) {
+  parts <- strsplit(walltime, ":")[[1]]
+  as.numeric(parts[1]) * 3600 + as.numeric(parts[2]) * 60
+} else {
+  # Assume already in seconds or minutes - try to parse
+  as.numeric(walltime) * 60  # Assume minutes if no colon
+}
+
+# Map resources to template variable names
+# Template uses: resources$ncpus, resources$mpp, resources$queue, resources$walltime
 resources <- list(
-  queue = queue,
-  cores = cores_per_job,
-  memory = memory_per_job,
-  walltime = walltime,
+  ncpus = cores_per_job,        # Number of CPUs (maps to -n)
+  mpp = memory_per_job,          # Memory per processor (maps to rusage[mem=...])
+  queue = queue,                 # Queue name (maps to -q)
+  walltime = walltime_seconds,   # Walltime in seconds (template converts to minutes)
   job.name = paste0(job_name_prefix, "_chunk")
 )
 
@@ -106,15 +149,74 @@ ids <- batchMap(
   reg = reg
 )
 
-# Submit jobs with resources
-submitJobs(ids, resources = resources, reg = reg)
+# Submit jobs with max_parallel constraint
+# If max_parallel is set, submit jobs in batches and wait for completion before submitting more
+if (max_parallel < length(ids)) {
+  # Submit in batches, waiting for jobs to complete before submitting next batch
+  num_batches <- ceiling(length(ids) / max_parallel)
+  all_submitted_ids <- c()
+  remaining_ids <- ids
+  
+  for (batch_idx in 1:num_batches) {
+    # Get next batch of jobs to submit
+    batch_size <- min(max_parallel, length(remaining_ids))
+    batch_ids <- remaining_ids[1:batch_size]
+    remaining_ids <- remaining_ids[-(1:batch_size)]
+    
+    cat(sprintf("Submitting batch %d/%d: %d jobs (max %d concurrent)...\n", 
+                batch_idx, num_batches, length(batch_ids), max_parallel))
+    submitJobs(batch_ids, resources = resources, reg = reg)
+    all_submitted_ids <- c(all_submitted_ids, batch_ids)
+    
+    # Wait for this batch to complete before submitting next batch (if any remain)
+    # Following InPAS pattern: use waitForJobs() for proper batchtools integration
+    if (length(remaining_ids) > 0) {
+      cat(sprintf("Waiting for batch %d to complete before submitting next batch...\n", batch_idx))
+      # Use waitForJobs() following InPAS pattern (more reliable than manual polling)
+      # waitForJobs() returns TRUE when all jobs are done, FALSE if timeout/error
+      while (!waitForJobs(ids = batch_ids, sleep = 30, timeout = Inf, 
+                          stop.on.error = FALSE, reg = reg)) {
+        # Get status for progress reporting
+        job_table <- getJobTable(ids = batch_ids, reg = reg)
+        batch_done <- sum(job_table$done, na.rm = TRUE)
+        batch_running <- sum(job_table$running, na.rm = TRUE)
+        batch_error <- sum(job_table$error, na.rm = TRUE)
+        batch_expired <- sum(job_table$expired, na.rm = TRUE)
+        completed <- batch_done + batch_error + batch_expired
+        
+        cat(sprintf("  Batch %d: %d/%d completed (%d done, %d running, %d error). Waiting...\n", 
+                    batch_idx, completed, length(batch_ids), batch_done, batch_running, batch_error))
+        Sys.sleep(30)  # Additional sleep for progress reporting
+      }
+      # Final status report
+      job_table <- getJobTable(ids = batch_ids, reg = reg)
+      batch_done <- sum(job_table$done, na.rm = TRUE)
+      batch_error <- sum(job_table$error, na.rm = TRUE)
+      batch_expired <- sum(job_table$expired, na.rm = TRUE)
+      cat(sprintf("Batch %d completed (%d done, %d error, %d expired). Proceeding to next batch.\n", 
+                  batch_idx, batch_done, batch_error, batch_expired))
+    }
+  }
+  submitted_ids <- all_submitted_ids
+} else {
+  # Submit all jobs at once (no limit)
+  cat(sprintf("Submitting all %d jobs at once (no max_parallel limit)...\n", length(ids)))
+  submitJobs(ids, resources = resources, reg = reg)
+  submitted_ids <- ids
+}
 
-cat(sprintf("Submitted %d jobs. Job IDs: %s\n", length(ids), paste(ids, collapse = ", ")))
+cat(sprintf("\nSubmitted %d jobs total. Job IDs: %s\n", length(submitted_ids), paste(submitted_ids, collapse = ", ")))
 cat(sprintf("Registry directory: %s\n", reg_dir))
 cat(sprintf("Monitor jobs with: bjobs -J %s*\n", job_name_prefix))
+cat(sprintf("Check all your jobs: bjobs -u $USER\n"))
+cat(sprintf("Check queue limits: bqueues -l %s\n", queue))
 cat(sprintf("Check status in R: loadRegistry('%s'); getStatus(reg)\n", reg_dir))
+cat(sprintf("\nNOTE: If only a few jobs are running, check:\n"))
+cat(sprintf("  1. LSF queue limits: bqueues -l %s (look for 'MAX' or 'JOB_LIMIT')\n", queue))
+cat(sprintf("  2. Your job limits: bqueues -l %s | grep -i limit\n", queue))
+cat(sprintf("  3. All your jobs: bjobs -u $USER (some may be PEND)\n"))
 
-# Write job IDs to file for Python to read
+# Write job IDs to file for Python to read (all IDs, not just submitted)
 writeLines(as.character(ids), file.path(reg_dir, "job_ids.txt"))
 
 # Write registry path for Python

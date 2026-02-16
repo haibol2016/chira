@@ -1,31 +1,51 @@
 #!/bin/bash
 ## Template file for batchtools LSF job submission
-## This is an example custom template - only needed if built-in "lsf-simple" doesn't work
+## Based on: https://github.com/haibol2016/InPAS/blob/master/inst/extdata/batchtools.lsf.tmpl
 ##
 ## To use this template:
 ## 1. Save this file (e.g., as lsf_custom.tmpl)
 ## 2. Modify submit_chunks_batchtools.R to use: template = "/path/to/lsf_custom.tmpl"
 ##
 ## Batchtools will replace these variables:
-## <%= resources %> - Resource requirements (queue, cores, memory, walltime)
+## <%= resources$ncpus %> - Number of CPUs/cores
+## <%= resources$mpp %> - Memory per CPU (for rusage[mem=...])
+## <%= resources$queue %> - LSF queue name
+## <%= resources$walltime %> - Walltime in seconds (converted to minutes for LSF)
 ## <%= job.name %> - Job name
 ## <%= log.file %> - Log file path
-## <%= rscript %> - R script to execute
-## <%= array %> - Array job specification (if applicable)
+## <%= uri %> - Job collection URI (for batchtools::doJobCollection)
 
-#BSUB <%= resources %>
-#BSUB -J <%= job.name %>
-#BSUB -o <%= log.file %>
-#BSUB -e <%= log.file %>
+#BSUB -n <%= resources$ncpus %>                     # minimal numbers of processors required for a parallel job
+#BSUB -R rusage[mem=<%= resources$mpp %>]          # ask for memory per cpu
+#BSUB -J <%= job.name %>                             # Name of the job
+#BSUB -o <%= log.file %>                             # Output is sent to logfile, stdout + stderr by default
+#BSUB -q <%= resources$queue %>                      # Job queue
+#BSUB -W <%= round(resources$walltime / 60, 1) %>    # Walltime (LSF requires minutes, batchtools uses seconds)
+##BSUB -M <%= resources$memory %>                    # Memory requirements, e.g. "5000KB", "500MB", "5GB" etc. 
+#BSUB -R "span[hosts=1]"                             # All hosts on the same chassis
 
-# Example: Load modules if needed
+## Export value of DEBUGME environment var to slave (if set)
+<% if (Sys.getenv("DEBUGME") != "") { -%>
+export DEBUGME=<%= Sys.getenv("DEBUGME") %>
+<% } -%>
+
+## Set threading environment variables (if resources specify them)
+<% if (!is.null(resources$omp.threads)) { -%>
+<%= sprintf("export OMP_NUM_THREADS=%i", resources$omp.threads) %>
+<% } -%>
+<% if (!is.null(resources$blas.threads)) { -%>
+<%= sprintf("export OPENBLAS_NUM_THREADS=%i", resources$blas.threads) %>
+<%= sprintf("export MKL_NUM_THREADS=%i", resources$blas.threads) %>
+<% } -%>
+
+## Example: Load modules if needed (uncomment and modify as needed)
 # module load python/3.9
 # module load bwa
 # module load samtools
 
-# Example: Set environment variables
+## Example: Set environment variables (uncomment and modify as needed)
 # export PATH=/path/to/tools:$PATH
 
-# Execute the R script
-<%= rscript %>
+## Execute the batchtools job collection
+Rscript -e 'batchtools::doJobCollection("<%= uri %>")'
 

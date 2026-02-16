@@ -10,6 +10,7 @@ import multiprocessing
 import time
 import json
 import tempfile
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Optional dependency for memory calculations
@@ -495,9 +496,11 @@ HOW IT WORKS:
   * Example: 32 processes, --parallel_chunks 4 → 8 processes per chunk
   * Each chunk processes jobs sequentially using all allocated processes
 - WITH CHUNKING (cluster mode, WITH --use_batchtools):
-  * Processes per job controlled by --batchtools_cores (default: auto-calculated)
-  * Each LSF job gets specified cores (typically 8-16 cores per job)
-  * Example: --batchtools_cores 16 → Each job uses 16 cores
+  * IMPORTANT: LSF jobs run on DIFFERENT cluster nodes, independent of main job
+  * --processes applies to main job only (which just submits and waits, minimal CPU needed)
+  * --batchtools_cores controls cores for EACH LSF job (which runs BWA on cluster nodes)
+  * These are COMPLETELY INDEPENDENT - main job doesn't need many cores
+  * Example: --batchtools_cores 16 → Each LSF job uses 16 cores (regardless of --processes)
 
 Note: This controls BWA alignment threads. Samtools operations (merge, sort)
 may use additional threads based on available resources.''')
@@ -622,13 +625,29 @@ Only effective when --chunk_fasta is specified.''')
 
     parser.add_argument('--batchtools_cores', action='store', type=int, default=None, metavar='',
                         dest='batchtools_cores',
-                        help='''Number of cores per batchtools job (default: auto-calculated from --processes).
-                                Should match your LSF job script -n parameter.''')
+                        help='''Number of cores per batchtools LSF job (default: 8 if not specified).
+
+IMPORTANT: In batchtools mode, LSF jobs run on DIFFERENT cluster nodes, independent of the main job.
+- --processes: Applies to the MAIN job (which submits and waits), NOT to LSF jobs
+- --batchtools_cores: Directly sets cores for EACH LSF job running on cluster nodes
+
+These are COMPLETELY INDEPENDENT:
+- Main job (--processes): Just submits jobs, minimal CPU needed
+- LSF jobs (--batchtools_cores): Run BWA alignment on cluster nodes, need 8-16 cores each
+
+Example: --batchtools_cores 8 → Each LSF job gets 8 cores (regardless of --processes)
+Example: --batchtools_cores 16 → Each LSF job gets 16 cores
+
+Should match your LSF job script: #BSUB -n parameter.''')
 
     parser.add_argument('--batchtools_memory', action='store', type=str, default=None, metavar='',
                         dest='batchtools_memory',
-                        help='''Memory per batchtools job, e.g., "8GB" (default: auto-calculated).
-                                Should match your LSF job script -R rusage[mem=...] parameter.''')
+                        help='''Total memory per batchtools job (automatically converted to per-core for LSF), e.g., "16GB" (default: auto-calculated).
+
+IMPORTANT: You specify TOTAL memory, but LSF rusage[mem=...] is PER CORE.
+The code automatically converts: total_memory ÷ cores = per_core_memory.
+Example: --batchtools_cores 8 --batchtools_memory 16GB → LSF gets rusage[mem=2GB] (16GB ÷ 8 = 2GB per core).
+Auto-calculation: cores × 0.5GB total (e.g., 8 cores → 4GB total → 0.5GB per core for LSF).''')
 
     parser.add_argument('--batchtools_walltime', action='store', type=str, default='240:00', metavar='',
                         dest='batchtools_walltime',
@@ -636,9 +655,18 @@ Only effective when --chunk_fasta is specified.''')
 
     parser.add_argument('--batchtools_max_parallel', action='store', type=int, default=None, metavar='',
                         dest='batchtools_max_parallel',
-                        help='''Maximum number of chunks to process simultaneously (default: unlimited).
-                                If not set, all chunks are submitted at once.
-                                Example: --chunk_fasta 20 --batchtools_max_parallel 10 → submit 10 at a time.''')
+                        help='''Maximum number of LSF jobs to run simultaneously (default: unlimited).
+                                If set, jobs are submitted in batches and the script waits for each batch
+                                to complete before submitting the next batch. This ensures only the specified
+                                number of jobs are running at any time.
+                                Example: --chunk_fasta 20 --batchtools_max_parallel 2 → only 2 jobs run at a time, all 20 will be processed sequentially.''')
+
+    parser.add_argument('--batchtools_template', action='store', type=str, default=None, metavar='',
+                        dest='batchtools_template',
+                        help='''Path to LSF template file for batchtools (default: lsf_custom.tmpl in ChiRA directory).
+                                The default template (lsf_custom.tmpl) is based on proven InPAS implementation.
+                                Specify a different template only if you need custom LSF directives or module loads.
+                                To use built-in "lsf-simple": set to "lsf-simple" (not recommended).''')
 
     parser.add_argument('--batchtools_conda_env', action='store', type=str, default=None, metavar='',
                         dest='batchtools_conda_env',
@@ -821,13 +849,44 @@ def submit_chunks_with_batchtools(args, chunk_files, chunk_dir, alignment_job_ty
     
     try:
         # Calculate resources
-        total_processes = args.processes if args.processes is not None else multiprocessing.cpu_count()
-        cores_per_job = args.batchtools_cores if args.batchtools_cores else max(4, per_chunk_processes)
-        if args.batchtools_memory:
-            memory_per_job = args.batchtools_memory
+        # NOTE: In batchtools mode, LSF jobs run on different cluster nodes, independent of main job
+        # --processes applies to the main job (which just submits and waits), not to LSF jobs
+        # --batchtools_cores directly specifies cores per LSF job
+        if args.batchtools_cores:
+            cores_per_job = args.batchtools_cores
         else:
-            estimated_memory_gb = max(4, cores_per_job * 0.5)
-            memory_per_job = f"{int(estimated_memory_gb)}GB"
+            # Default: Use a reasonable default (8 cores) since we can't infer from main job
+            # User should specify --batchtools_cores explicitly for best results
+            cores_per_job = 8
+            print(f"WARNING: --batchtools_cores not specified. Using default: {cores_per_job} cores per LSF job.", file=sys.stderr)
+            print(f"         Specify --batchtools_cores explicitly to match your LSF job requirements.", file=sys.stderr)
+        
+        # Memory handling: User specifies TOTAL memory, but LSF rusage[mem=...] is PER CORE
+        # Convert total memory to per-core memory for LSF
+        if args.batchtools_memory:
+            # Parse total memory (e.g., "16GB" -> 16)
+            mem_match = re.match(r'(\d+)(GB|G|MB|M)', args.batchtools_memory.upper())
+            if mem_match:
+                mem_value = int(mem_match.group(1))
+                mem_unit = mem_match.group(2)
+                # Convert to GB if needed
+                if mem_unit in ['MB', 'M']:
+                    total_memory_gb = mem_value / 1024
+                else:
+                    total_memory_gb = mem_value
+                # Convert total to per-core (LSF uses per-core memory)
+                memory_per_core_gb = total_memory_gb / cores_per_job
+                memory_per_job = f"{memory_per_core_gb:.1f}GB"  # Per-core memory for LSF
+            else:
+                print(f"WARNING: Could not parse --batchtools_memory '{args.batchtools_memory}'. Using auto-calculation.", file=sys.stderr)
+                estimated_total_memory_gb = max(4, cores_per_job * 0.5)  # Total memory
+                memory_per_core_gb = estimated_total_memory_gb / cores_per_job
+                memory_per_job = f"{memory_per_core_gb:.1f}GB"  # Per-core memory
+        else:
+            # Auto-calculate: total memory = cores × 0.5GB, then convert to per-core
+            estimated_total_memory_gb = max(4, cores_per_job * 0.5)
+            memory_per_core_gb = estimated_total_memory_gb / cores_per_job
+            memory_per_job = f"{memory_per_core_gb:.1f}GB"  # Per-core memory for LSF
         
         # Determine conda environment
         conda_env = args.batchtools_conda_env
@@ -853,6 +912,20 @@ def submit_chunks_with_batchtools(args, chunk_files, chunk_dir, alignment_job_ty
             alignment_job_types_list.append(list(job_type))
         
         # Prepare configuration
+        max_parallel = args.batchtools_max_parallel if args.batchtools_max_parallel else len(chunks_data)
+        # Default to lsf_custom.tmpl in the same directory as chira_map.py
+        if hasattr(args, 'batchtools_template') and args.batchtools_template:
+            template_file = args.batchtools_template
+        else:
+            # Default: use lsf_custom.tmpl in the ChiRA directory
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            default_template = os.path.join(script_dir, "lsf_custom.tmpl")
+            if os.path.exists(default_template):
+                template_file = default_template
+            else:
+                # Fallback to built-in if custom template not found
+                template_file = "lsf-simple"
+                print(f"WARNING: lsf_custom.tmpl not found at {default_template}. Using built-in 'lsf-simple' template.", file=sys.stderr)
         config = {
             "reg_dir": reg_dir,
             "queue": args.batchtools_queue,
@@ -864,7 +937,9 @@ def submit_chunks_with_batchtools(args, chunk_files, chunk_dir, alignment_job_ty
             "chunk_dir": chunk_dir,
             "alignment_job_types_json": json.dumps(alignment_job_types_list),
             "per_chunk_processes": per_chunk_processes,
-            "job_name_prefix": f"chira_bt_{os.path.basename(args.outdir)}_{int(time.time())}"
+            "job_name_prefix": f"chira_bt_{os.path.basename(args.outdir)}_{int(time.time())}",
+            "max_parallel": max_parallel,
+            "template_file": template_file
         }
         
         # Write config and chunks to JSON files
@@ -885,7 +960,19 @@ def submit_chunks_with_batchtools(args, chunk_files, chunk_dir, alignment_job_ty
         
         # Call R script to submit jobs
         print(f"INFO: Submitting {len(chunks_data)} chunk jobs via batchtools...", file=sys.stderr)
-        print(f"      Queue: {config['queue']}, Cores: {cores_per_job}, Memory: {memory_per_job}", file=sys.stderr)
+        if max_parallel < len(chunks_data):
+            print(f"      NOTE: --batchtools_max_parallel={max_parallel} limits concurrent submissions", file=sys.stderr)
+            print(f"      Jobs will be submitted in batches of {max_parallel}", file=sys.stderr)
+        # Calculate total memory for display (per-core × cores)
+        mem_match = re.match(r'([\d.]+)(GB|G)', memory_per_job.upper())
+        if mem_match:
+            mem_per_core = float(mem_match.group(1))
+            total_memory = mem_per_core * cores_per_job
+            print(f"      Queue: {config['queue']}, Cores: {cores_per_job}, Memory: {memory_per_job} per core ({total_memory:.1f}GB total)", file=sys.stderr)
+        else:
+            print(f"      Queue: {config['queue']}, Cores: {cores_per_job}, Memory: {memory_per_job} per core", file=sys.stderr)
+        print(f"      TIP: If only a few jobs are running, check LSF queue limits: bqueues -l {config['queue']}", file=sys.stderr)
+        print(f"      TIP: Monitor all your jobs: bjobs -u $USER", file=sys.stderr)
         
         result = subprocess.run(
             ['Rscript', r_script, config_file, chunks_file],
@@ -918,7 +1005,7 @@ def submit_chunks_with_batchtools(args, chunk_files, chunk_dir, alignment_job_ty
         return None, None
 
 
-def wait_for_batchtools_jobs(reg_dir, chunk_files):
+def wait_for_batchtools_jobs(reg_dir, chunk_files, alignment_job_types):
     """
     Wait for batchtools jobs to complete and collect results.
     
@@ -928,6 +1015,7 @@ def wait_for_batchtools_jobs(reg_dir, chunk_files):
     Args:
         reg_dir: Batchtools registry directory
         chunk_files: List of chunk FASTA file paths
+        alignment_job_types: List of alignment job type tuples (to determine which BAM files to collect)
     
     Returns:
         dict: Dictionary mapping job_name -> list of chunk BAM file paths
@@ -938,6 +1026,13 @@ def wait_for_batchtools_jobs(reg_dir, chunk_files):
     if not chunk_dir:
         return {}
     
+    # Determine expected job type names from alignment_job_types
+    expected_job_types = []
+    for (align_type, index_type, refindex, seed_length, align_score,
+         match_score, mismatch_score, gap_o, gap_e, n_aligns) in alignment_job_types:
+        job_name = f"{index_type}.{align_type}"
+        expected_job_types.append(job_name)
+    
     all_chunk_bams = {}
     completed_chunks = set()
     failed_chunks = []
@@ -945,6 +1040,7 @@ def wait_for_batchtools_jobs(reg_dir, chunk_files):
     print(f"INFO: Waiting for batchtools jobs to complete...", file=sys.stderr)
     print(f"      Monitor jobs: bjobs -u $USER", file=sys.stderr)
     print(f"      Check registry: {reg_dir}", file=sys.stderr)
+    print(f"      Expected job types: {', '.join(expected_job_types)}", file=sys.stderr)
     
     # Try to use batchtools R API for efficient status checking
     use_r_api = True
@@ -979,9 +1075,9 @@ def wait_for_batchtools_jobs(reg_dir, chunk_files):
             completion_file = os.path.join(chunk_outdir, "chunk_complete.txt")
             
             if os.path.exists(completion_file):
-                # Chunk completed, collect BAM files
+                # Chunk completed, collect BAM files for expected job types
                 chunk_bams = {}
-                for job_type in ["index1.long", "index1.short", "index2.long", "index2.short"]:
+                for job_type in expected_job_types:
                     bam_file = os.path.join(chunk_outdir, job_type + ".bam")
                     if os.path.exists(bam_file):
                         if job_type not in all_chunk_bams:
@@ -1214,7 +1310,8 @@ def run_bwa_mapping_with_chunking(args, index1, index2):
         
         if reg_dir and job_ids:
             print(f"INFO: Successfully submitted {len(job_ids)} batchtools jobs", file=sys.stderr)
-            all_chunk_bams = wait_for_batchtools_jobs(reg_dir, chunk_files)
+            # Pass alignment_job_types to wait function so it knows which BAM files to look for
+            all_chunk_bams = wait_for_batchtools_jobs(reg_dir, chunk_files, alignment_job_types)
             chira_utilities.print_w_time(f"END: All chunks processed via batchtools")
         else:
             print("ERROR: batchtools submission failed. Falling back to single-node mode.", file=sys.stderr)
