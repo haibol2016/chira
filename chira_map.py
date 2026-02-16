@@ -499,11 +499,15 @@ HOW IT WORKS:
   * 2 jobs if only index1 is used (long + short)
   * 4 jobs if both index1 and index2 are used (long + short × 2 indices)
   * Example: 32 processes, 4 jobs → 8 processes per job (32 total)
-- WITH CHUNKING: Total processes are divided among parallel chunks (controlled by --parallel_chunks, default: 2)
+- WITH CHUNKING (single-node mode, NO --use_dask):
+  * Total processes divided among parallel chunks (controlled by --parallel_chunks, default: 2)
   * Example: 32 processes, --parallel_chunks 2 → 16 processes per chunk
   * Example: 32 processes, --parallel_chunks 4 → 8 processes per chunk
   * Each chunk processes jobs sequentially using all allocated processes
-  * With <16 processes: Only 1 chunk runs at a time
+- WITH CHUNKING (cluster mode, WITH --use_dask):
+  * Processes per worker controlled by --dask_cores (default: auto-calculated)
+  * Each worker job gets specified cores (typically 8-16 cores per worker)
+  * Example: --dask_cores 16 → Each worker uses 16 cores
 
 Note: This controls BWA alignment threads. Samtools operations (merge, sort)
 may use additional threads based on available resources.''')
@@ -596,80 +600,32 @@ may use additional threads based on available resources.''')
 
     parser.add_argument('--chunk_fasta', action='store', type=int, default=None, metavar='',
                         dest='chunk_fasta',
-                        help='''Split input FASTA into N chunks for parallel processing (recommended for large files >1GB).
+                        help='''Split input FASTA into N chunks for parallel processing (recommended for files >1GB).
 
-HOW TO SET --chunk_fasta:
-- GENERAL RULE: Set based on input file size to create 1-3GB chunks
-  * Small files (<1GB): Leave unset (no chunking needed)
-  * Medium files (1-10GB): --chunk_fasta 5-10 (creates ~1-2GB chunks)
-  * Large files (10-50GB): --chunk_fasta 10-20 (creates ~2-5GB chunks)
-  * Very large files (>50GB): --chunk_fasta 20-50 (creates ~1-2.5GB chunks)
-- FORMULA: N ≈ input_file_size_GB / desired_chunk_size_GB
-  * Example: 20GB file, want 2GB chunks → --chunk_fasta 10
-  * Example: 5GB file, want 1GB chunks → --chunk_fasta 5
-- OPTIMAL CHUNK SIZE: 1-3GB per chunk for best I/O performance
-- More chunks = better I/O parallelism but more overhead
-- Fewer chunks = less overhead but larger memory usage per chunk
+Set N to create 1-3GB chunks: N ≈ file_size_GB / desired_chunk_size_GB.
+Example: 20GB file → --chunk_fasta 10 (creates ~2GB chunks).
 
-HOW IT WORKS:
-1. FASTA is split into N chunks (as specified by --chunk_fasta)
-2. Chunks are processed in batches (number controlled by --parallel_chunks, default: 2)
-3. Each chunk processes all BWA jobs sequentially
-4. Remaining chunks are processed in subsequent batches
+Single-node: Process chunks in batches via --parallel_chunks (default: 2).
+Cluster: Distribute chunks via --use_dask and --dask_max_parallel (default: 2).
 
-EXECUTION WITH CHUNKING:
-- Number of parallel chunks is controlled by --parallel_chunks (default: 2)
-- Processes per chunk = --processes / --parallel_chunks
-- Example: --chunk_fasta 10 --processes 32 --parallel_chunks 2 → 2 chunks at a time (16 processes each)
-- Example: --chunk_fasta 10 --processes 32 --parallel_chunks 4 → 4 chunks at a time (8 processes each)
-- If processes per chunk < 4, the number of parallel chunks is automatically reduced
-
-BENEFITS:
-- Better I/O: Each chunk reads from different parts of the file, reducing disk contention
-- Lower memory: Each BWA job processes smaller chunks, reducing peak memory usage
-- Resource management: Control parallel chunks with --parallel_chunks to match your system resources
-- Each BWA job gets processes based on --processes / --parallel_chunks
-
-WHEN TO USE CHUNKING:
-- Use chunking for: Large files (>1GB), memory-constrained systems, I/O bottlenecks
-- Skip chunking for: Small files (<1GB), systems with abundant memory
-
-If I/O performance is a concern:
-- Monitor disk I/O wait time with: iostat -x 1 or iotop
-- If I/O is the bottleneck, reduce --chunk_fasta (fewer chunks = less I/O contention)
-- Reduce --processes (fewer threads per chunk = less I/O per chunk)
-- Use faster storage (SSD instead of HDD, faster network storage)''')
+Benefits: Better I/O, lower memory per job, scalable parallelism.
+Use for: Large files (>1GB), memory constraints, I/O bottlenecks.''')
 
     parser.add_argument('--parallel_chunks', action='store', type=int, default=2, metavar='',
                         dest='parallel_chunks',
-                        help='''Number of chunks to process simultaneously when using --chunk_fasta.
+                        help='''Number of chunks to process simultaneously in single-node mode (default: 2).
 
-HOW TO SET --parallel_chunks:
-- GENERAL RULE: Set based on available memory and CPU resources
-  * Default: 2 (recommended for most systems)
-  * Each chunk processes BWA jobs sequentially, so N chunks = N active BWA jobs
-  * Each BWA job needs 4-8 CPUs, so ensure: parallel_chunks × 4-8 ≤ --processes
-- RECOMMENDATIONS:
-  * Small systems (<16 cores, <32GB RAM): --parallel_chunks 1
-  * Medium systems (16-32 cores, 32-64GB RAM): --parallel_chunks 2 (default)
-  * Large systems (>32 cores, >64GB RAM): --parallel_chunks 2-4
-  * Very large systems (>64 cores, >128GB RAM): --parallel_chunks 4-8
-- MEMORY CONSIDERATION:
-  * More parallel chunks = more memory usage
-  * Each chunk needs memory for BWA alignment (typically 2-4GB per chunk)
-  * Total memory ≈ parallel_chunks × 4GB (approximate)
-- CPU CONSIDERATION:
-  * Processes per chunk = --processes / --parallel_chunks
-  * Each chunk should get at least 4 processes for optimal BWA performance
-  * Example: --processes 32 --parallel_chunks 4 → 8 processes per chunk (good)
-  * Example: --processes 8 --parallel_chunks 4 → 2 processes per chunk (too few)
+Only used when --use_dask is NOT specified. For cluster mode, use --dask_max_parallel instead.
 
-Note: This parameter only takes effect when --chunk_fasta is specified.''')
+Recommendations: Small systems (<16 cores): 1, Medium (16-32 cores): 2, Large (>32 cores): 2-4.
+Each chunk needs ~4GB memory and 4-8 CPUs. Ensure: parallel_chunks × 4-8 ≤ --processes.''')
 
     parser.add_argument('--use_dask', action='store_true', dest='use_dask',
                         help='''Use Dask-Jobqueue to distribute chunk processing across HPC cluster nodes.
-                                Requires dask-jobqueue package. Falls back to ThreadPoolExecutor if not available.
-                                Only effective when --chunk_fasta is specified.''')
+
+Requires: dask-jobqueue package, LSF scheduler, shared filesystem.
+Falls back to single-node mode if Dask unavailable.
+Only effective when --chunk_fasta is specified.''')
 
     parser.add_argument('--dask_queue', action='store', type=str, default='long', metavar='',
                         dest='dask_queue',
@@ -689,20 +645,21 @@ Note: This parameter only takes effect when --chunk_fasta is specified.''')
                         dest='dask_walltime',
                         help='Walltime limit for Dask worker jobs, e.g., "240:00" (default: 240:00).')
 
-    parser.add_argument('--dask_workers', action='store', type=int, default=None, metavar='',
-                        dest='dask_workers',
-                        help='''Number of Dask worker jobs to submit (default: number of chunks).
-                                Each worker processes one chunk. Set lower to limit cluster resource usage.''')
+    parser.add_argument('--dask_max_parallel', action='store', type=int, default=2, metavar='',
+                        dest='dask_max_parallel',
+                        help='''Number of Dask worker jobs and parallel chunks for cluster mode (default: 2).
+
+Only used with --use_dask. Creates N workers and processes N chunks simultaneously.
+Example: --chunk_fasta 20 --dask_max_parallel 5 → 5 workers, 20 chunks in batches of 5.
+For single-node mode, use --parallel_chunks instead.''')
 
     parser.add_argument('--dask_conda_env', action='store', type=str, default=None, metavar='',
                         dest='dask_conda_env',
-                        help='''Conda environment name or path to activate in Dask worker jobs.
-                                If not specified, auto-detects from CONDA_DEFAULT_ENV environment variable.
-                                Required for ensuring ChiRA dependencies (BWA, samtools, Python packages) are available on worker nodes.
-                                Example: --dask_conda_env chira_env
-                                Example: --dask_conda_env /path/to/miniconda3/envs/chira_env''')
+                        help='''Conda environment for Dask workers (default: auto-detect from CONDA_DEFAULT_ENV).
+                                Ensures ChiRA dependencies are available on worker nodes.
+                                Example: --dask_conda_env chira_env''')
 
-    parser.add_argument('-v', '--version', action='version', version='%(prog)s 1.4.4')
+    parser.add_argument('-v', '--version', action='version', version=f'%(prog)s {chira_utilities.__version__}')
 
     args = parser.parse_args()
     # Set default processes to CPU count if not specified
@@ -736,23 +693,33 @@ def print_cpu_guidance(args):
         total_processes = args.processes if args.processes is not None else cpu_count
         
         if args.chunk_fasta and args.chunk_fasta > 1:
-            # CHUNKING MODE: Multiple chunks run in parallel
-            # Each chunk processes alignment jobs sequentially
-            # Use user-specified parallel_chunks (default 2), limited by number of chunks
-            num_parallel_chunks = min(args.parallel_chunks, args.chunk_fasta)
-            per_chunk_processes = calculate_per_job_processes(total_processes, num_parallel_chunks)
-            
             num_job_types = 2  # Default: long + short
             if args.idx2 or (args.build_index and args.ref_fasta2):
                 num_job_types = 4  # long + short × 2 indices
             
-            print(f"INFO: Using {total_processes} total processes across {num_parallel_chunks} parallel chunks", file=sys.stderr)
-            print(f"      → {per_chunk_processes} processes per chunk (on {cpu_count}-core system)", file=sys.stderr)
-            print(f"      Each chunk processes {num_job_types} alignment jobs sequentially.", file=sys.stderr)
-            
-            if total_processes > cpu_count * 1.5:
-                print(f"WARNING: Total processes ({total_processes}) exceeds system cores ({cpu_count})", file=sys.stderr)
-                print(f"         Consider reducing --processes or --chunk_fasta.", file=sys.stderr)
+            if args.use_dask:
+                # CLUSTER MODE: Chunks distributed across cluster nodes
+                max_parallel = args.dask_max_parallel if hasattr(args, 'dask_max_parallel') else 2
+                num_workers = max_parallel  # Workers equal to max_parallel for maximum utilization
+                cores_per_worker = args.dask_cores if args.dask_cores else max(4, total_processes // max(1, args.parallel_chunks))
+                print(f"INFO: Cluster mode (Dask): {num_workers} worker jobs, processing {max_parallel} chunks simultaneously", file=sys.stderr)
+                print(f"      → {cores_per_worker} cores per worker", file=sys.stderr)
+                print(f"      → Total cluster resources: {num_workers * cores_per_worker} cores", file=sys.stderr)
+                print(f"      Each worker processes {num_job_types} alignment jobs sequentially.", file=sys.stderr)
+            else:
+                # SINGLE-NODE MODE: Multiple chunks run in parallel on same node
+                # Each chunk processes alignment jobs sequentially
+                # Use user-specified parallel_chunks (default 2), limited by number of chunks
+                num_parallel_chunks = min(args.parallel_chunks, args.chunk_fasta)
+                per_chunk_processes = calculate_per_job_processes(total_processes, num_parallel_chunks)
+                
+                print(f"INFO: Single-node mode: Using {total_processes} total processes across {num_parallel_chunks} parallel chunks", file=sys.stderr)
+                print(f"      → {per_chunk_processes} processes per chunk (on {cpu_count}-core system)", file=sys.stderr)
+                print(f"      Each chunk processes {num_job_types} alignment jobs sequentially.", file=sys.stderr)
+                
+                if total_processes > cpu_count * 1.5:
+                    print(f"WARNING: Total processes ({total_processes}) exceeds system cores ({cpu_count})", file=sys.stderr)
+                    print(f"         Consider reducing --processes or --chunk_fasta.", file=sys.stderr)
         else:
             # NON-CHUNKING MODE: Multiple alignment jobs run in parallel
             num_jobs = 2  # Default: long + short with index1
@@ -797,6 +764,14 @@ def print_configuration(args):
     print('Chimeric overlap                     : ' + str(args.chimeric_overlap))
     if args.chunk_fasta:
         print('FASTA chunking                       : ' + str(args.chunk_fasta) + ' chunks (enabled)')
+        if args.use_dask:
+            print('Cluster distribution                  : Enabled (Dask-Jobqueue)')
+            if hasattr(args, 'dask_max_parallel'):
+                print('  Dask max parallel (workers)        : ' + str(args.dask_max_parallel))
+            print('  Dask queue                         : ' + args.dask_queue)
+            print('  Conda environment                  : ' + (args.dask_conda_env if args.dask_conda_env else 'Auto-detect'))
+        else:
+            print('Parallel chunks (single-node)        : ' + str(args.parallel_chunks))
     else:
         print('FASTA chunking                       : Disabled (using parallel job strategy)')
     print("===================================================================")
@@ -877,11 +852,9 @@ def setup_dask_cluster(args, num_chunks):
             estimated_memory_gb = max(4, cores_per_worker * 0.5)  # ~0.5GB per core
             memory_per_worker = f"{int(estimated_memory_gb)}GB"
         
-        # Number of workers: use user setting or one per chunk
-        if args.dask_workers:
-            num_workers = min(args.dask_workers, num_chunks)
-        else:
-            num_workers = num_chunks  # One worker per chunk
+        # Number of workers equals max_parallel for maximum resource utilization
+        max_parallel = args.dask_max_parallel if hasattr(args, 'dask_max_parallel') else 2
+        num_workers = min(max_parallel, num_chunks)  # Don't create more workers than chunks
         
         # Determine conda environment to use
         conda_env = args.dask_conda_env
@@ -918,7 +891,8 @@ def setup_dask_cluster(args, num_chunks):
         
         print(f"INFO: Setting up Dask cluster with LSF scheduler:", file=sys.stderr)
         print(f"      Queue: {args.dask_queue}", file=sys.stderr)
-        print(f"      Workers: {num_workers} (one per chunk)", file=sys.stderr)
+        max_parallel = args.dask_max_parallel if hasattr(args, 'dask_max_parallel') else 2
+        print(f"      Workers: {num_workers} (equal to --dask_max_parallel={max_parallel} for maximum utilization)", file=sys.stderr)
         print(f"      Cores per worker: {cores_per_worker}", file=sys.stderr)
         print(f"      Memory per worker: {memory_per_worker}", file=sys.stderr)
         print(f"      Walltime: {args.dask_walltime}", file=sys.stderr)
@@ -999,7 +973,17 @@ def run_bwa_mapping_with_chunking(args, index1, index2):
     """
     OPTIMIZATION: Run BWA mapping with chunking strategy for very large files.
     
-    EXECUTION MODEL - How chunking jobs are executed:
+    EXECUTION MODEL - Two modes supported:
+    
+    1. SINGLE-NODE MODE (default, --use_dask NOT specified):
+       - Uses ThreadPoolExecutor for parallelization
+       - Controlled by --parallel_chunks (default: 2)
+       - All chunks run on same machine
+    
+    2. CLUSTER MODE (--use_dask specified):
+       - Uses Dask-Jobqueue to distribute across HPC cluster nodes
+       - Controlled by --dask_max_parallel (default: 2)
+       - Chunks distributed across different cluster nodes
     
     Example: 10 chunks, 4 alignment job types (index1.long, index1.short, index2.long, index2.short)
     
@@ -1012,8 +996,9 @@ def run_bwa_mapping_with_chunking(args, index1, index2):
     └─────────────────────────────────────────────────────────────────────────┘
     
     ┌─────────────────────────────────────────────────────────────────────────┐
-    │ STEP 2: Process chunks in parallel (N chunks simultaneously, controlled by --parallel_chunks) │
+    │ STEP 2: Process chunks in parallel                                      │
     │                                                                          │
+    │   SINGLE-NODE MODE (--parallel_chunks):                                  │
     │   Batch 1: Chunk 0 (parallel)    Chunk 1 (parallel)                    │
     │   ┌──────────────┐      ┌──────────────┐                              │
     │   │ Job 1: long │      │ Job 1: long │                              │
@@ -1029,12 +1014,14 @@ def run_bwa_mapping_with_chunking(args, index1, index2):
     │   │ + index2    │      │ + index2    │                              │
     │   └──────────────┘      └──────────────┘                              │
     │   (sequential)          (sequential)                                    │
-    │                                                                          │
     │   Batch 2: Chunk 2, Chunk 3 (after Batch 1 completes)                   │
-    │   ... (continues until all 10 chunks are processed)                     │
+    │                                                                          │
+    │   CLUSTER MODE (--use_dask):                                             │
+    │   All chunks submitted simultaneously to cluster nodes                   │
+    │   Each chunk runs on different node (controlled by --dask_max_parallel)   │
+    │   Within each chunk: 4 jobs run sequentially                           │
     │                                                                          │
     │   Total: 10 chunks × 4 jobs = 40 BWA alignment jobs                      │
-    │   Parallelism: N chunks run simultaneously (N active BWA jobs, controlled by --parallel_chunks) │
     │   Within each chunk: 4 jobs run sequentially                           │
     └─────────────────────────────────────────────────────────────────────────┘
     
@@ -1061,24 +1048,18 @@ def run_bwa_mapping_with_chunking(args, index1, index2):
     └─────────────────────────────────────────────────────────────────────────┘
     
     Key Points:
-    - Chunks run in PARALLEL (number controlled by --parallel_chunks, default: 2)
+    - SINGLE-NODE MODE: Chunks run in parallel (controlled by --parallel_chunks, default: 2)
+    - CLUSTER MODE: Chunks distributed across nodes (controlled by --dask_max_parallel)
     - Within each chunk, alignment jobs run SEQUENTIALLY (one after another)
-    - Each BWA job needs 4-8 CPUs, so N chunks = N active BWA jobs at a time
+    - Each BWA job needs 4-8 CPUs
     - Total jobs = num_chunks × num_alignment_job_types
     - Each chunk produces one BAM file per alignment job type
     - Chunk BAMs are merged by job type to produce final BAMs
-    - Each job within a chunk uses all processes allocated to that chunk
-    - Processes per chunk = --processes / --parallel_chunks
-    - If processes per chunk < 4, the number of parallel chunks is automatically reduced
+    - Processes per chunk = --processes / --parallel_chunks (single-node) or --dask_cores (cluster)
     
     Performance Benefits:
-    - Better I/O: Each chunk reads from different parts of the file, reducing disk contention
-    - Lower memory: Each BWA job processes smaller chunks, reducing peak memory usage
-    - Resource management: Control parallel chunks with --parallel_chunks (default: 2) to match your system resources
-    - For 10GB file with 150M reads:
-      * Without chunking: Single large BWA job, high memory, sequential I/O
-      * With 10 chunks (2 at a time): ~10x lower memory per job, parallel I/O, controlled resource usage
-      * Expected speedup: 2-3x depending on I/O subsystem and available cores
+    - Better I/O (reduced disk contention), lower memory per job, scalable parallelism
+    - Cluster mode: Distribute across nodes with --use_dask for maximum speedup
     """
     chira_utilities.print_w_time(f"START: Splitting FASTA into {args.chunk_fasta} chunks")
     chunk_dir = os.path.join(args.outdir, "chunks")
@@ -1097,23 +1078,15 @@ def run_bwa_mapping_with_chunking(args, index1, index2):
     print(f"INFO: Each chunk will be processed through {num_job_types} alignment job types", file=sys.stderr)
     print(f"INFO: Total alignment jobs = {len(chunk_files)} chunks × {num_job_types} job types = {len(chunk_files) * num_job_types} jobs", file=sys.stderr)
     
-    # Calculate optimal number of parallel chunks based on user setting and available processes
-    # User can specify --parallel_chunks to control how many chunks run simultaneously
+    # Calculate parallel chunks and processes per chunk
     total_processes = args.processes if args.processes is not None else multiprocessing.cpu_count()
-    
-    # Use user-specified number of parallel chunks (default is 2)
-    # Limited by: user setting, number of chunks available, and available processes
     num_parallel_chunks = min(args.parallel_chunks, len(chunk_files))
-    
-    # Calculate processes per chunk: divide total processes among parallel chunks
-    # This ensures each chunk gets enough processes (4-8) for BWA alignment
     per_chunk_processes = calculate_per_job_processes(total_processes, num_parallel_chunks)
     
     # Ensure each chunk gets at least 4 processes (minimum for BWA)
     if per_chunk_processes < 4:
-        # If we don't have enough processes for requested chunks, reduce number of parallel chunks
         required_processes = args.parallel_chunks * 4
-        num_parallel_chunks = max(1, total_processes // 4)  # At least 1 chunk, at most what we can support
+        num_parallel_chunks = max(1, total_processes // 4)
         per_chunk_processes = calculate_per_job_processes(total_processes, num_parallel_chunks)
         print(f"WARNING: Not enough processes for {args.parallel_chunks} chunks (need at least {required_processes}, have {total_processes}).", file=sys.stderr)
         print(f"         Running {num_parallel_chunks} chunks in parallel instead ({per_chunk_processes} processes each).", file=sys.stderr)
@@ -1142,8 +1115,7 @@ def run_bwa_mapping_with_chunking(args, index1, index2):
         os.makedirs(chunk_outdir, exist_ok=True)
         
         chunk_bams = {}
-        # EXECUTION: Process each alignment job type SEQUENTIALLY for this chunk
-        # This prevents resource exhaustion when multiple chunks run in parallel
+        # Process alignment jobs sequentially within this chunk
         for (align_type, index_type, refindex, seed_length, align_score,
              match_score, mismatch_score, gap_o, gap_e, n_aligns) in alignment_job_types:
             job_name = f"{index_type}.{align_type}"
@@ -1183,25 +1155,10 @@ def run_bwa_mapping_with_chunking(args, index1, index2):
         
         return chunk_bams
     
-    # EXECUTION MODEL: Process chunks in PARALLEL using Dask (HPC cluster) or ThreadPoolExecutor (single node)
-    # 
-    # Dask Mode (--use_dask):
-    # - Each chunk is submitted as a separate LSF job to cluster nodes
-    # - All chunks can run simultaneously across different cluster nodes
-    # - No limit on parallel chunks (limited only by cluster resources)
-    # - Each worker node processes one chunk independently
-    #
-    # ThreadPoolExecutor Mode (default):
-    # - Number of parallel chunks is controlled by --parallel_chunks (default: 2)
-    # - Each BWA job needs 4-8 CPUs, so N chunks = N active BWA jobs at a time
-    # - Example: 32 processes, 10 chunks, --parallel_chunks 2 → 2 chunks in parallel (16 processes each)
-    # - Example: 32 processes, 10 chunks, --parallel_chunks 4 → 4 chunks in parallel (8 processes each)
-    # - Chunks are processed in batches (size controlled by --parallel_chunks) until all chunks are complete
-    #
-    # Within Each Chunk (SEQUENTIAL):
-    # - All alignment job types run one after another
-    # - Example: chunk_000 runs index1.long → index1.short → index2.long → index2.short
-    # - Each job uses all processes allocated to the chunk (per_chunk_processes)
+    # Process chunks in parallel: Dask (cluster) or ThreadPoolExecutor (single-node)
+    # Dask mode: Controlled by --dask_max_parallel, chunks distributed across nodes
+    # Single-node mode: Controlled by --parallel_chunks, chunks processed in batches
+    # Within each chunk: Alignment jobs run sequentially
     
     # Extract chunk index from filename (e.g., "chunk_005.fasta" -> 5)
     def get_chunk_idx(chunk_file):
@@ -1213,7 +1170,8 @@ def run_bwa_mapping_with_chunking(args, index1, index2):
     
     if cluster and client:
         # DASK MODE: Distribute chunks across HPC cluster nodes
-        chira_utilities.print_w_time(f"START: Processing {len(chunk_files)} chunks across HPC cluster using Dask")
+        max_parallel = args.dask_max_parallel if hasattr(args, 'dask_max_parallel') else 2
+        chira_utilities.print_w_time(f"START: Processing {len(chunk_files)} chunks across HPC cluster using Dask (max {max_parallel} parallel)")
         all_chunk_bams = {}  # Dictionary: job_name -> list of chunk BAM files
         failed_chunks = []
         
@@ -1229,29 +1187,50 @@ def run_bwa_mapping_with_chunking(args, index1, index2):
                 )
                 chunk_tasks.append((chunk_idx, chunk_file, task_args))
             
-            # Submit all chunks to Dask cluster
-            futures = {}
-            for chunk_idx, chunk_file, task_args in chunk_tasks:
-                future = client.submit(process_chunk_with_args, *task_args)
-                futures[future] = (chunk_idx, chunk_file)
+            # Submit chunks to Dask cluster in batches (controlled by --dask_max_parallel)
+            # This limits how many chunks run simultaneously
+            max_parallel = args.dask_max_parallel if hasattr(args, 'dask_max_parallel') else 2
+            max_parallel = max(1, max_parallel)  # Ensure at least 1
             
-            # Collect results as they complete
-            # Use Dask's as_completed for proper async result collection
             from dask.distributed import as_completed as dask_as_completed
             
-            for future in dask_as_completed(futures):
-                chunk_idx, chunk_file = futures[future]
-                try:
-                    chunk_bams = future.result()
-                    # Organize chunk BAMs by job type for later merging
-                    for job_name, bam_file in chunk_bams.items():
-                        if job_name not in all_chunk_bams:
-                            all_chunk_bams[job_name] = []
-                        all_chunk_bams[job_name].append(bam_file)
-                    print(f"INFO: Chunk {chunk_idx} completed successfully", file=sys.stderr)
-                except Exception as e:
-                    failed_chunks.append((chunk_idx, str(e)))
-                    print(f"ERROR: Chunk {chunk_idx} failed: {str(e)}", file=sys.stderr)
+            # Track active futures and pending tasks
+            active_futures = {}  # future -> (chunk_idx, chunk_file)
+            pending_tasks = list(chunk_tasks)  # Queue of tasks not yet submitted
+            futures = {}  # All futures for tracking
+            
+            # Submit initial batch up to max_parallel
+            while len(active_futures) < max_parallel and pending_tasks:
+                chunk_idx, chunk_file, task_args = pending_tasks.pop(0)
+                future = client.submit(process_chunk_with_args, *task_args)
+                active_futures[future] = (chunk_idx, chunk_file)
+                futures[future] = (chunk_idx, chunk_file)
+            
+            # Process results as they complete and submit new tasks
+            while active_futures:
+                # Wait for at least one future to complete
+                for future in dask_as_completed(active_futures):
+                    chunk_idx, chunk_file = active_futures.pop(future)
+                    try:
+                        chunk_bams = future.result()
+                        # Organize chunk BAMs by job type for later merging
+                        for job_name, bam_file in chunk_bams.items():
+                            if job_name not in all_chunk_bams:
+                                all_chunk_bams[job_name] = []
+                            all_chunk_bams[job_name].append(bam_file)
+                        print(f"INFO: Chunk {chunk_idx} completed successfully", file=sys.stderr)
+                    except Exception as e:
+                        failed_chunks.append((chunk_idx, str(e)))
+                        print(f"ERROR: Chunk {chunk_idx} failed: {str(e)}", file=sys.stderr)
+                    
+                    # Submit next task from queue if available
+                    if pending_tasks and len(active_futures) < max_parallel:
+                        chunk_idx, chunk_file, task_args = pending_tasks.pop(0)
+                        future = client.submit(process_chunk_with_args, *task_args)
+                        active_futures[future] = (chunk_idx, chunk_file)
+                        futures[future] = (chunk_idx, chunk_file)
+                    
+                    break  # Process one at a time to maintain max_parallel limit
         
         finally:
             # Always close cluster and client, even if errors occurred

@@ -1019,7 +1019,7 @@ If not specified (None): Automatically determines optimal number based on CPU co
 If specified: Uses the specified number of processes (will be limited by available CPUs and transcript count). 
 Set to 1 to disable parallel processing.''')
 
-    parser.add_argument('-v', '--version', action='version', version='%(prog)s 1.4.4')
+    parser.add_argument('-v', '--version', action='version', version=f'%(prog)s {chira_utilities.__version__}')
 
     args = parser.parse_args()
 

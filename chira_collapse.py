@@ -2,6 +2,7 @@
 from collections import defaultdict
 import argparse
 import gzip
+import chira_utilities
 
 # Note: Bio.SeqIO is no longer used - raw file parsing is faster for large files
 
@@ -17,7 +18,7 @@ if __name__ == "__main__":
                         help='Output fasta file')
     parser.add_argument("-u", '--umi_len', action='store', type=int, default=0, help="Length of the UMI, if present."
                         "It is trimmed from the 5' end of each read and appended to the tag id")
-    parser.add_argument('-v', '--version', action='version', version='%(prog)s 1.4.4')
+    parser.add_argument('-v', '--version', action='version', version=f'%(prog)s {chira_utilities.__version__}')
 
     args = parser.parse_args()
     print('Input FASTQ          : ' + args.fastq)

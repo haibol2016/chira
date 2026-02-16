@@ -1,9 +1,18 @@
 #!/usr/bin/env python
+"""
+ChiRA Utilities Module
+
+This module contains shared utility functions and constants used across ChiRA scripts.
+"""
+
 import argparse
 import re
 import subprocess
 from Bio import SeqIO
 from datetime import datetime
+
+# Version number - single source of truth for all ChiRA scripts
+__version__ = "1.4.8"
 
 # Try to import psutil for adaptive buffer sizing (optional dependency)
 try:

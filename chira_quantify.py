@@ -570,7 +570,7 @@ if __name__ == "__main__":
                              'Multi-processing is most beneficial for large datasets (>500 multimapping reads). '
                              'Set to 1 to disable parallel processing.')
 
-    parser.add_argument('-v', '--version', action='version', version='%(prog)s 1.4.4')
+    parser.add_argument('-v', '--version', action='version', version=f'%(prog)s {chira_utilities.__version__}')
 
     args = parser.parse_args()
 

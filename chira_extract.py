@@ -910,7 +910,7 @@ def parse_arguments():
     parser.add_argument('-z', '--gzip', action='store_true', dest='compress',
                         help='Compress output files (chimeras and singletons) with gzip')
 
-    parser.add_argument('-v', '--version', action='version', version='%(prog)s 1.4.4')
+    parser.add_argument('-v', '--version', action='version', version=f'%(prog)s {chira_utilities.__version__}')
 
     return parser.parse_args()
 
