@@ -5,6 +5,52 @@ All notable changes to ChiRA will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.9] - 2026-02-15
+
+### Added
+- **chira_map.py**:
+  - Added `--parallel_chunks` parameter to control how many chunks run simultaneously when using `--chunk_fasta`
+  - Default value: 2 (recommended for most systems)
+  - Allows users to customize parallelism based on their system resources (memory, CPU)
+  - Comprehensive help text with recommendations for different system sizes
+
+### Changed
+- **chira_map.py**:
+  - Changed from hardcoded limit of 2 parallel chunks to user-configurable via `--parallel_chunks` parameter
+  - Default behavior preserved: 2 chunks in parallel (same as before when parameter not specified)
+  - Updated execution model comments to reflect configurable parallelism
+  - Updated ASCII diagrams and documentation to show user control over parallel chunk execution
+  - **Bug fix**: Fixed `print_cpu_guidance()` function that was incorrectly using total chunks (`args.chunk_fasta`) instead of parallel chunks for CPU guidance display
+    - Now correctly uses `args.parallel_chunks` (default: 2) to match actual execution logic
+    - Fixes misleading CPU usage information in guidance output
+
+- **README.md**:
+  - Added comprehensive documentation for `--parallel_chunks` parameter
+  - Updated `--chunk_fasta` documentation to reference `--parallel_chunks`
+  - Updated usage examples to show `--parallel_chunks` usage
+  - Updated "Understanding Chunking and Process Management" section with new parameter
+  - Added recommendations for setting `--parallel_chunks` based on system resources
+
+## [1.4.8] - 2026-02-15
+
+### Changed
+- **chira_merge.py**:
+  - **Improved chunk-based parallelization strategy** for very large transcript counts (e.g., human genome with 387K+ transcripts)
+    - Changed from adaptive chunk sizing to fixed target chunk size (~1000 transcripts per chunk)
+    - For human genome (387,944 transcripts): Creates ~388 manageable chunks instead of 32 large chunks
+    - Removes artificial caps that limited chunk count, allowing proper scaling for very large datasets
+    - Better load balancing and reduced overhead for datasets with hundreds of thousands of transcripts
+  - **Variable naming consistency**: Updated all "chrom"/"chromid" references to "transcript"/"transcriptid" throughout the code
+    - Updated function parameters, variable names, comments, and docstrings
+    - Reflects that column 1 of input BED file contains transcript IDs, not chromosome IDs
+  - **Bug fix**: Added `None` check in `merge_loci_blockbuster()` to prevent errors when `prev_transcript_strand` is `None` (first iteration or empty file)
+  - **Updated help text**: Changed argument help text from "chromosome processing" to "transcript processing" for accuracy
+
+### Fixed
+- **chira_merge.py**:
+  - Fixed potential `AttributeError` in `merge_loci_blockbuster()` when processing empty files or at first iteration
+  - Fixed variable naming inconsistency (chrom vs transcript) that could cause confusion
+
 ## [1.4.7] - 2026-02-15
 
 ### Added

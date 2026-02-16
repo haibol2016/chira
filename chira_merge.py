@@ -300,13 +300,13 @@ def reads_to_segments(bed, outdir, segment_overlap_fraction, chimeric_overlap, r
         write_segments(prev_readid, filtered_alignments, segment_overlap_fraction, fh_out)
 
 
-def merge_overlapping_intervals(d_desc, chrom, alignment_overlap_fraction):
+def merge_overlapping_intervals(d_desc, transcript, alignment_overlap_fraction):
     t_merged = []
     d_mergeddesc = defaultdict(list)
-    for currentpos in sorted(d_desc[chrom], key=lambda tup: tup[0]):
+    for currentpos in sorted(d_desc[transcript], key=lambda tup: tup[0]):
         if not t_merged:
             t_merged.append(currentpos)
-            d_mergeddesc[currentpos[0]].extend(d_desc[chrom][currentpos])
+            d_mergeddesc[currentpos[0]].extend(d_desc[transcript][currentpos])
         else:
             prevpos = t_merged[-1]
             if currentpos[0] <= prevpos[1]:
@@ -315,95 +315,218 @@ def merge_overlapping_intervals(d_desc, chrom, alignment_overlap_fraction):
                         or overlap_len / float(prevpos[1] - prevpos[0] + 1) >= alignment_overlap_fraction:
                     end = max(prevpos[1], currentpos[1])
                     t_merged[-1] = (prevpos[0], end)  # replace by merged interval
-                    d_mergeddesc[prevpos[0]].extend(d_desc[chrom][currentpos])
+                    d_mergeddesc[prevpos[0]].extend(d_desc[transcript][currentpos])
                 else:
                     t_merged.append(currentpos)
-                    d_mergeddesc[currentpos[0]].extend(d_desc[chrom][currentpos])
+                    d_mergeddesc[currentpos[0]].extend(d_desc[transcript][currentpos])
                     continue
             else:
                 t_merged.append(currentpos)
-                d_mergeddesc[currentpos[0]].extend(d_desc[chrom][currentpos])
+                d_mergeddesc[currentpos[0]].extend(d_desc[transcript][currentpos])
     return t_merged, d_mergeddesc
 
 
-def _process_chromosome_overlap(args_tuple):
+def _calculate_optimal_chunks(num_transcripts, num_processes):
     """
-    OPTIMIZATION: Worker function for parallel chromosome processing.
+    Calculate optimal number of chunks for parallel transcript processing.
     
-    Processes a single chromosome independently, allowing parallel execution.
+    Strategy: Use 2-4x num_processes for optimal load balancing while minimizing overhead.
+    This balances:
+      - Load balancing: More chunks = better distribution of work
+      - Overhead: Fewer chunks = less serialization/queue management overhead
+      - Rule of thumb: 2-4x num_processes is optimal for most workloads
+    
+    Examples:
+      - 8 processes, 387K transcripts: 24 chunks (16K transcripts/chunk)
+      - 8 processes, 10K transcripts: 24 chunks (417 transcripts/chunk)
+      - 4 processes, 1K transcripts: 12 chunks (83 transcripts/chunk)
+    
+    Constraints:
+      - Minimum chunk size: 100 transcripts (too small = overhead dominates)
+      - Maximum chunk size: 50K transcripts (too large = poor load balancing)
+      - Minimum chunks: 1 (for single transcript or single process)
+      - Maximum chunks: num_transcripts (one chunk per transcript max)
+    
+    Args:
+        num_transcripts: Total number of transcripts to process
+        num_processes: Number of parallel processes to use
+    
+    Returns:
+        Tuple of (num_chunks, chunk_size) where:
+            - num_chunks: Optimal number of chunks
+            - chunk_size: Number of transcripts per chunk
+    """
+    if num_processes > 1:
+        # Optimal: 2-4x num_processes for load balancing
+        # Use 3x as a good middle ground
+        optimal_chunks = 3 * num_processes
+        
+        # Calculate chunk size based on optimal chunk count
+        chunk_size = max(100, (num_transcripts + optimal_chunks - 1) // optimal_chunks)  # Ceiling division, min 100
+        
+        # Cap chunk size to prevent chunks from being too large (poor load balancing)
+        max_chunk_size = 50000
+        if chunk_size > max_chunk_size:
+            chunk_size = max_chunk_size
+        
+        # Recalculate num_chunks based on final chunk_size
+        num_chunks = max(1, (num_transcripts + chunk_size - 1) // chunk_size)  # Ceiling division
+        
+        # Ensure we don't exceed num_transcripts (one chunk per transcript max)
+        num_chunks = min(num_chunks, num_transcripts)
+    else:
+        # Single process: use one chunk (sequential processing)
+        num_chunks = 1
+        chunk_size = num_transcripts
+    
+    # Ensure we have at least 1 chunk
+    num_chunks = max(1, num_chunks)
+    
+    # Recalculate chunk_size based on final num_chunks (for consistency)
+    chunk_size = (num_transcripts + num_chunks - 1) // num_chunks  # Ceiling division
+    
+    return num_chunks, chunk_size
+
+
+def _create_transcript_chunks(d_desc, num_chunks, num_transcripts):
+    """
+    Group transcripts into chunks for parallel processing.
+    
+    Args:
+        d_desc: Dictionary of {transcript: {positions -> alignments}}
+        num_chunks: Number of chunks to create
+        num_transcripts: Total number of transcripts
+    
+    Returns:
+        List of tuples, each containing (chunk_transcripts, chunk_data) where:
+            - chunk_transcripts: List of transcript identifiers
+            - chunk_data: Dictionary of {transcript: {positions -> alignments}} for this chunk
+    """
+    sorted_transcripts = sorted(d_desc.keys())
+    chunk_size = (num_transcripts + num_chunks - 1) // num_chunks  # Ceiling division
+    
+    chunks = []
+    for i in range(0, num_transcripts, chunk_size):
+        chunk_transcripts = sorted_transcripts[i:i + chunk_size]
+        chunk_data = {transcript: dict(d_desc[transcript]) for transcript in chunk_transcripts}
+        chunks.append((chunk_transcripts, chunk_data))
+    
+    return chunks
+
+
+def _process_transcript_chunk_overlap(args_tuple):
+    """
+    OPTIMIZATION: Worker function for parallel processing of transcript chunks.
+    
+    Processes a chunk of transcripts independently, allowing parallel execution.
     This function is designed to be called by multiprocessing.Pool.
     
     Args:
-        args_tuple: Tuple of (chrom, chrom_data, alignment_overlap_fraction, min_locus_size)
-            - chrom: Chromosome identifier (e.g., "chr1\t+")
-            - chrom_data: Dictionary of positions -> alignments for this chromosome
+        args_tuple: Tuple of (chunk_transcripts, chunk_data, alignment_overlap_fraction, min_locus_size)
+            - chunk_transcripts: List of transcript identifiers (e.g., ["ENST000001\t+", "ENST000002\t-", ...])
+            - chunk_data: Dictionary of {transcript: {positions -> alignments}} for this chunk
             - alignment_overlap_fraction: Minimum overlap fraction for merging
             - min_locus_size: Minimum number of alignments per locus
     
     Returns:
-        Tuple of (chrom, output_lines) where output_lines is a list of BED lines to write
+        List of (transcript, output_lines) tuples where output_lines is a list of BED lines to write
     """
-    chrom, chrom_data, alignment_overlap_fraction, min_locus_size = args_tuple
-    t_merged, d_mergeddesc = merge_overlapping_intervals({chrom: chrom_data}, chrom, alignment_overlap_fraction)
+    chunk_transcripts, chunk_data, alignment_overlap_fraction, min_locus_size = args_tuple
+    results = []
     
-    output_lines = []
-    for pos in t_merged:
-        d_longest_alignments = defaultdict(int)
-        # choose per locus per transcript only one longest alignment
-        # First pass: find longest alignment per read/transcript
-        for alignment in d_mergeddesc[pos[0]]:
-            alignment_parts = alignment.split(',')
-            segmentid = alignment_parts[0]
-            transcriptid = alignment_parts[1]
-            start = int(alignment_parts[2])
-            end = int(alignment_parts[3])
-            # cutting out the segment id gives the read id
-            readid = '|'.join(segmentid.split('|')[:-1])
-            alignment_key = readid + "\t" + transcriptid
-            alignment_len = end - start
-            if alignment_len > d_longest_alignments[alignment_key]:
-                d_longest_alignments[alignment_key] = alignment_len
-        # Second pass: collect only longest alignments
-        l_alignments = []
-        for alignment in d_mergeddesc[pos[0]]:
-            alignment_parts = alignment.split(',')
-            segmentid = alignment_parts[0]
-            transcriptid = alignment_parts[1]
-            start = int(alignment_parts[2])
-            end = int(alignment_parts[3])
-            readid = '|'.join(segmentid.split('|')[:-1])
-            alignment_key = readid + "\t" + transcriptid
-            alignment_len = end - start
-            if alignment_len >= d_longest_alignments[alignment_key]:
-                l_alignments.append(alignment)
-        [chromid, strand] = chrom.split("\t")
-        # ignore locus if has not enough alignments
-        if len(l_alignments) < min_locus_size:
-            continue
-        output_lines.append("\t".join([chromid, str(pos[0]), str(pos[1]), strand, ";".join(sorted(l_alignments))]) + "\n")
+    # Process each transcript in the chunk
+    for transcript in sorted(chunk_transcripts):
+        transcript_data = {transcript: chunk_data[transcript]}
+        t_merged, d_mergeddesc = merge_overlapping_intervals(transcript_data, transcript, alignment_overlap_fraction)
+        
+        output_lines = []
+        for pos in t_merged:
+            d_longest_alignments = defaultdict(int)
+            # choose per locus per transcript only one longest alignment
+            # First pass: find longest alignment per read/transcript
+            for alignment in d_mergeddesc[pos[0]]:
+                alignment_parts = alignment.split(',')
+                segmentid = alignment_parts[0]
+                transcriptid = alignment_parts[1]
+                start = int(alignment_parts[2])
+                end = int(alignment_parts[3])
+                # cutting out the segment id gives the read id
+                readid = '|'.join(segmentid.split('|')[:-1])
+                alignment_key = readid + "\t" + transcriptid
+                alignment_len = end - start
+                if alignment_len > d_longest_alignments[alignment_key]:
+                    d_longest_alignments[alignment_key] = alignment_len
+            # Second pass: collect only longest alignments
+            l_alignments = []
+            for alignment in d_mergeddesc[pos[0]]:
+                alignment_parts = alignment.split(',')
+                segmentid = alignment_parts[0]
+                transcriptid = alignment_parts[1]
+                start = int(alignment_parts[2])
+                end = int(alignment_parts[3])
+                readid = '|'.join(segmentid.split('|')[:-1])
+                alignment_key = readid + "\t" + transcriptid
+                alignment_len = end - start
+                if alignment_len >= d_longest_alignments[alignment_key]:
+                    l_alignments.append(alignment)
+            [transcriptid, strand] = transcript.split("\t")
+            # ignore locus if has not enough alignments
+            if len(l_alignments) < min_locus_size:
+                continue
+            output_lines.append("\t".join([transcriptid, str(pos[0]), str(pos[1]), strand, ";".join(sorted(l_alignments))]) + "\n")
+        
+        results.append((transcript, output_lines))
     
-    return chrom, output_lines
+    return results
 
 
-def _process_chromosome_blockbuster(args_tuple):
+def _process_transcript_blockbuster(args_tuple):
     """
-    OPTIMIZATION: Worker function for parallel chromosome processing in blockbuster mode.
+    OPTIMIZATION: Worker function for parallel transcript processing in blockbuster mode.
     
-    Processes a single chromosome to get merged positions only (not full output).
+    Processes a single transcript to get merged positions only (not full output).
     This function is designed to be called by multiprocessing.Pool.
     
     Args:
-        args_tuple: Tuple of (chrom, chrom_data, alignment_overlap_fraction)
-            - chrom: Chromosome identifier (e.g., "chr1\t+")
-            - chrom_data: Dictionary of positions -> alignments for this chromosome
+        args_tuple: Tuple of (transcript, transcript_data, alignment_overlap_fraction)
+            - transcript: Transcript identifier (e.g., "ENST000001\t+")
+            - transcript_data: Dictionary of positions -> alignments for this transcript
             - alignment_overlap_fraction: Minimum overlap fraction for merging
     
     Returns:
-        Tuple of (chrom, t_merged) where t_merged is list of merged positions
+        Tuple of (transcript, t_merged) where t_merged is list of merged positions
     """
-    chrom, chrom_data, alignment_overlap_fraction = args_tuple
-    t_merged, d_mergeddesc = merge_overlapping_intervals({chrom: chrom_data}, chrom, alignment_overlap_fraction)
-    return chrom, t_merged
+    transcript, transcript_data, alignment_overlap_fraction = args_tuple
+    t_merged, d_mergeddesc = merge_overlapping_intervals({transcript: transcript_data}, transcript, alignment_overlap_fraction)
+    return transcript, t_merged
+
+
+def _process_transcript_chunk_blockbuster(args_tuple):
+    """
+    OPTIMIZATION: Worker function for parallel processing of transcript chunks in blockbuster mode.
+    
+    Processes a chunk of transcripts independently, allowing parallel execution.
+    This function is designed to be called by multiprocessing.Pool.
+    
+    Args:
+        args_tuple: Tuple of (chunk_transcripts, chunk_data, alignment_overlap_fraction)
+            - chunk_transcripts: List of transcript identifiers (e.g., ["ENST000001\t+", "ENST000002\t-", ...])
+            - chunk_data: Dictionary of {transcript: {positions -> alignments}} for this chunk
+            - alignment_overlap_fraction: Minimum overlap fraction for merging
+    
+    Returns:
+        List of (transcript, t_merged) tuples where t_merged is list of merged positions
+    """
+    chunk_transcripts, chunk_data, alignment_overlap_fraction = args_tuple
+    results = []
+    
+    # Process each transcript in the chunk
+    for transcript in sorted(chunk_transcripts):
+        transcript_data = {transcript: chunk_data[transcript]}
+        t_merged, d_mergeddesc = merge_overlapping_intervals(transcript_data, transcript, alignment_overlap_fraction)
+        results.append((transcript, t_merged))
+    
+    return results
 
 
 def merge_loci_overlap(outdir, alignment_overlap_fraction, min_locus_size, num_processes=None):
@@ -433,46 +556,54 @@ def merge_loci_overlap(outdir, alignment_overlap_fraction, min_locus_size, num_p
     print(str(datetime.datetime.now()), "merging overlapping alignments")
     merged_bed = os.path.join(outdir, "merged.bed")
     
-    # OPTIMIZATION: Process chromosomes in parallel using multiprocessing
+    # OPTIMIZATION: Process transcripts in chunks to reduce overhead
     # Performance Impact:
-    # - Chromosomes are independent and can be processed in parallel
-    # - For large BED files with many chromosomes, this provides 4-8x speedup
+    # - With tens of thousands of transcripts, processing each separately creates too much overhead
+    # - Instead, group transcripts into chunks (e.g., 10-50 chunks) and process chunks in parallel
+    # - This reduces serialization/deserialization overhead and queue management overhead
     # - Uses multiprocessing (not threading) to bypass Python GIL
     # - Each process has its own GIL, enabling true parallelism
-    # - For 24 chromosomes on 8-core system: ~3x speedup (limited by CPU cores)
     if num_processes is None:
-        num_processes = max(1, min(multiprocessing.cpu_count(), len(d_desc)))
-    else:
-        # User-specified number of processes, but don't exceed number of chromosomes
-        num_processes = max(1, min(num_processes, len(d_desc)))
+        num_processes = multiprocessing.cpu_count()
     
-    if num_processes > 1 and len(d_desc) > 1:
-        # OPTIMIZATION: Parallel processing for multiple chromosomes
-        # Prepare arguments for each chromosome (sorted to match original behavior)
-        chrom_args = [(chrom, dict(d_desc[chrom]), alignment_overlap_fraction, min_locus_size) 
-                      for chrom in sorted(d_desc.keys())]
+    num_transcripts = len(d_desc)
+    num_chunks, chunk_size = _calculate_optimal_chunks(num_transcripts, num_processes)
+    
+    if num_processes > 1 and num_transcripts > 1 and num_chunks > 1:
+        # Group transcripts into chunks
+        chunks = _create_transcript_chunks(d_desc, num_chunks, num_transcripts)
         
-        # Process chromosomes in parallel
-        print(str(datetime.datetime.now()), f"Processing {len(chrom_args)} chromosomes in parallel using {num_processes} processes")
+        # Prepare chunk arguments with additional parameters
+        chunk_args = [(chunk_transcripts, chunk_data, alignment_overlap_fraction, min_locus_size)
+                      for chunk_transcripts, chunk_data in chunks]
+        
+        # Process chunks in parallel
+        print(str(datetime.datetime.now()), f"Processing {num_transcripts} transcripts in {len(chunk_args)} chunks using {num_processes} processes")
         with Pool(processes=num_processes) as pool:
-            results = pool.map(_process_chromosome_overlap, chrom_args)
+            chunk_results = pool.map(_process_transcript_chunk_overlap, chunk_args)
+        
+        # Flatten results: chunk_results is a list of lists of (transcript, output_lines) tuples
+        all_results = []
+        for chunk_result in chunk_results:
+            all_results.extend(chunk_result)
         
         # Collect results and write in sorted order
         # OPTIMIZATION: Use adaptive buffer size (8-16MB) for I/O efficiency when writing large merged files
         # This reduces system calls by 8-16x compared to 1MB buffers and improves performance by 10-50x
         BUFFER_SIZE = chira_utilities.get_adaptive_buffer_size(num_files=1)
         with open(merged_bed, "w", buffering=BUFFER_SIZE) as fh_out:
-            # Sort results by chromosome to maintain consistent output order
-            for chrom, output_lines in sorted(results):
+            # Sort results by transcript to maintain consistent output order
+            for transcript, output_lines in sorted(all_results):
                 for line in output_lines:
                     fh_out.write(line)
     else:
-        # Fallback to sequential processing for single chromosome or single-core systems
+        # Fallback to sequential processing for single transcript or single-core systems
+        # NOTE: This path preserves the exact original logic for backward compatibility
         BUFFER_SIZE = chira_utilities.get_adaptive_buffer_size(num_files=1)
         with open(merged_bed, "w", buffering=BUFFER_SIZE) as fh_out:
-            for chrom in sorted(d_desc.keys()):
-                t_merged, d_mergeddesc = merge_overlapping_intervals(d_desc, chrom, alignment_overlap_fraction)
-                del d_desc[chrom]
+            for transcript in sorted(d_desc.keys()):
+                t_merged, d_mergeddesc = merge_overlapping_intervals(d_desc, transcript, alignment_overlap_fraction)
+                del d_desc[transcript]
                 for pos in t_merged:
                     d_longest_alignments = defaultdict(int)
                     # choose per locus per transcript only one longest alignment
@@ -502,22 +633,22 @@ def merge_loci_overlap(outdir, alignment_overlap_fraction, min_locus_size, num_p
                         alignment_len = end - start
                         if alignment_len >= d_longest_alignments[alignment_key]:
                             l_alignments.append(alignment)
-                    [chromid, strand] = chrom.split("\t")
+                    [transcriptid, strand] = transcript.split("\t")
                     # ignore locus if has not enough alignments
                     if len(l_alignments) < min_locus_size:
                         continue
-                    fh_out.write("\t".join([chromid, str(pos[0]), str(pos[1]), strand, ";".join(sorted(l_alignments))]) + "\n")
+                    fh_out.write("\t".join([transcriptid, str(pos[0]), str(pos[1]), strand, ";".join(sorted(l_alignments))]) + "\n")
     
     d_desc.clear()
     return
 
 
-def write_merged_pos(d_mergeddesc, prev_chrom_strand, fh_out):
+def write_merged_pos(d_mergeddesc, prev_transcript_strand, fh_out):
     for merged_pos in d_mergeddesc.keys():
         l_alignments = d_mergeddesc[merged_pos]
-        [chromid, strand] = prev_chrom_strand.split("\t")
+        [transcriptid, strand] = prev_transcript_strand.split("\t")
         fh_out.write(
-            "\t".join([chromid, str(merged_pos[0]), str(merged_pos[1]), strand, ";".join(sorted(l_alignments))]) + "\n")
+            "\t".join([transcriptid, str(merged_pos[0]), str(merged_pos[1]), strand, ";".join(sorted(l_alignments))]) + "\n")
     d_mergeddesc.clear()
 
 
@@ -580,43 +711,50 @@ def merge_loci_blockbuster(outdir, distance, min_cluster_height, min_block_heigh
                 continue
             d_desc[f[1] + "\t" + f[4]][(int(f[2]), int(f[3]))].append(f[0])
 
-    # OPTIMIZATION: Process chromosomes in parallel using multiprocessing
+    # OPTIMIZATION: Process transcripts in chunks to reduce overhead
     # Performance Impact:
-    # - Chromosomes are independent and can be processed in parallel
-    # - For large BED files with many chromosomes, this provides 4-8x speedup
+    # - With tens of thousands of transcripts, processing each separately creates too much overhead
+    # - Instead, group transcripts into chunks (e.g., 10-50 chunks) and process chunks in parallel
+    # - This reduces serialization/deserialization overhead and queue management overhead
     # - Uses multiprocessing (not threading) to bypass Python GIL
     # - Each process has its own GIL, enabling true parallelism
     if num_processes is None:
-        num_processes = max(1, min(multiprocessing.cpu_count(), len(d_desc)))
+        num_processes = multiprocessing.cpu_count()
     else:
-        # User-specified number of processes, but don't exceed number of chromosomes
+        # User-specified number of processes, but don't exceed number of transcripts
         num_processes = max(1, min(num_processes, len(d_desc)))
+    
+    num_transcripts = len(d_desc)
+    num_chunks, chunk_size = _calculate_optimal_chunks(num_transcripts, num_processes)
+    
     d_merged = defaultdict()
     
-    if num_processes > 1 and len(d_desc) > 1:
-        # OPTIMIZATION: Parallel processing for multiple chromosomes
-        # Prepare arguments for each chromosome (sorted to match original behavior)
-        chrom_args = [(chrom, dict(d_desc[chrom]), alignment_overlap_fraction) 
-                      for chrom in sorted(d_desc.keys())]
+    if num_processes > 1 and num_transcripts > 1 and num_chunks > 1:
+        # Group transcripts into chunks
+        chunks = _create_transcript_chunks(d_desc, num_chunks, num_transcripts)
         
-        # Process chromosomes in parallel
-        print(str(datetime.datetime.now()), f"Processing {len(chrom_args)} chromosomes in parallel using {num_processes} processes")
+        # Prepare chunk arguments with additional parameters
+        chunk_args = [(chunk_transcripts, chunk_data, alignment_overlap_fraction)
+                      for chunk_transcripts, chunk_data in chunks]
+        
+        # Process chunks in parallel
+        print(str(datetime.datetime.now()), f"Processing {num_transcripts} transcripts in {len(chunk_args)} chunks using {num_processes} processes")
         with Pool(processes=num_processes) as pool:
-            results = pool.map(_process_chromosome_blockbuster, chrom_args)
+            chunk_results = pool.map(_process_transcript_chunk_blockbuster, chunk_args)
         
-        # Collect merged positions for each chromosome
-        # pool.map preserves input order, so results are already sorted
-        for chrom, t_merged in results:
-            d_merged[chrom] = t_merged
+        # Flatten results: chunk_results is a list of lists of (transcript, t_merged) tuples
+        for chunk_result in chunk_results:
+            for transcript, t_merged in chunk_result:
+                d_merged[transcript] = t_merged
     else:
         # Fallback to sequential processing
-        for chrom in sorted(d_desc.keys()):
-            t_merged, d_mergeddesc = merge_overlapping_intervals(d_desc, chrom, alignment_overlap_fraction)
-            d_merged[chrom] = t_merged
+        for transcript in sorted(d_desc.keys()):
+            t_merged, d_mergeddesc = merge_overlapping_intervals(d_desc, transcript, alignment_overlap_fraction)
+            d_merged[transcript] = t_merged
 
     merged_bed = os.path.join(outdir, "merged.bed")
     d_mergeddesc = defaultdict(list)
-    prev_chrom_strand = None
+    prev_transcript_strand = None
     # OPTIMIZATION: Use adaptive buffer size (8-16MB) for I/O efficiency when reading/writing large BED files
     # This reduces system calls by 8-16x compared to 1MB buffers and improves performance by 10-50x
     # Performance Impact: For large datasets, 8MB buffer = ~6,400 system calls vs 1MB = ~51,200 calls
@@ -624,20 +762,21 @@ def merge_loci_blockbuster(outdir, distance, min_cluster_height, min_block_heigh
     with open(merged_bed, "w", buffering=BUFFER_SIZE) as fh_out, open(os.path.join(outdir, "segments.sorted.bed"), buffering=BUFFER_SIZE) as fh_in:
         for line in fh_in:
             f = line.rstrip('\n').split('\t')
-            chrom_strand = f[0] + "\t" + f[5]
+            transcript_strand = f[0] + "\t" + f[5]
             start = f[1]
             end = f[2]
-            if prev_chrom_strand != chrom_strand:
-                write_merged_pos(d_mergeddesc, prev_chrom_strand, fh_out)
-            if chrom_strand in d_merged:
-                for merged_pos in d_merged[chrom_strand]:
-                    # within the merged psotion range
+            if prev_transcript_strand is not None and prev_transcript_strand != transcript_strand:
+                write_merged_pos(d_mergeddesc, prev_transcript_strand, fh_out)
+            if transcript_strand in d_merged:
+                for merged_pos in d_merged[transcript_strand]:
+                    # within the merged position range
                     if int(start) >= merged_pos[0] and int(end) <= merged_pos[1]:
                         d_mergeddesc[merged_pos].append(f[3])
                         break
-            prev_chrom_strand = chrom_strand
-        # write last chromosome positions
-        write_merged_pos(d_mergeddesc, prev_chrom_strand, fh_out)
+            prev_transcript_strand = transcript_strand
+        # write last transcript positions
+        if prev_transcript_strand is not None:
+            write_merged_pos(d_mergeddesc, prev_transcript_strand, fh_out)
     os.remove(os.path.join(outdir, "segments.blockbuster"))
 
     return
@@ -875,9 +1014,9 @@ if __name__ == "__main__":
 
     parser.add_argument('-p', '--processes', action='store', type=int, default=None, metavar='',
                         dest='num_processes',
-                        help='''Number of parallel processes to use for chromosome processing. 
-If not specified (None): Uses min(cpu_count(), num_chromosomes). 
-If specified: Uses min(user_value, num_chromosomes). 
+                        help='''Number of parallel processes to use for transcript processing. 
+If not specified (None): Automatically determines optimal number based on CPU count and transcript count. 
+If specified: Uses the specified number of processes (will be limited by available CPUs and transcript count). 
 Set to 1 to disable parallel processing.''')
 
     parser.add_argument('-v', '--version', action='version', version='%(prog)s 1.4.4')

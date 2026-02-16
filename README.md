@@ -1,13 +1,15 @@
 # ChiRA - Chimeric Read Analyzer
 
-**Version**: 1.4.6 (Modified with performance optimizations and parallel computing support)
+**Version**: 1.4.8 (Modified with performance optimizations and parallel computing support)
 
 ChiRA is a set of tools to analyze RNA-RNA interactome experimental data such as CLASH, CLEAR-CLIP, PARIS, SPLASH etc. Following are the descriptions of the each tool. Here we provide descriptions about the input and ouptput files. For the detailed description of the other parameters please look at the help texts of tools.
 
 **Note**: This is a modified version of ChiRA (based on v1.4.3) with significant performance optimizations and new features. The original code is licensed under GPL v3, and this modified version maintains the same license. All changes are documented in the "Recent Improvements" section below and in [CHANGELOG.md](CHANGELOG.md).
 
 ## Version History
-- **v1.4.6** (Current, 2026-02-15): Multiprocessing improvements, adaptive I/O buffer sizing, FASTA chunking, I/O bottleneck detection, and code refactoring
+- **v1.4.8** (Current, 2026-02-15): Improved chunk-based parallelization for very large transcript counts (e.g., human genome with 387K+ transcripts), variable naming consistency improvements, and bug fixes in chira_merge.py
+- **v1.4.7** (2026-02-15): New utility scripts (extract_transcripts_from_genome.py), U→T conversion in download_mirbase_mature.py, gffread support, and removal of deprecated scripts
+- **v1.4.6** (2026-02-15): Multiprocessing improvements, adaptive I/O buffer sizing, FASTA chunking, I/O bottleneck detection, and code refactoring
 - **v1.4.5** (2026-02-02): Parallel computing support, I/O optimizations, automatic memory management, and enhanced performance
 - **v1.4.4** (2026-01-26): Performance optimizations, BEDTools compatibility, sample name support, comprehensive bug fixes, and new utility scripts
 - **v1.4.3** (Previous): Original version from GitHub (https://github.com/pavanvidem/chira)
@@ -16,16 +18,34 @@ See [CHANGELOG.md](CHANGELOG.md) for detailed change history.
 
 ## Recent Improvements
 
+### v1.4.7 (2026-02-15) - Utility Script Updates & Improvements
+
+**New Features:**
+- **extract_transcripts_from_genome.py**: New utility script to extract transcript FASTA sequences from genome FASTA using gffread
+  - Replaces `remove_mirna_hairpin_from_fasta.py` with a more accurate approach
+  - Extracts sequences directly from genome coordinates using gffread
+- **download_mirbase_mature.py**: Added automatic U→T conversion in mature miRNA sequences for ChiRA compatibility
+- **concatenate_gtf.py**: Updated documentation to reflect that miRBase GFF3 format can be used directly with ChiRA
+
+**Docker:**
+- Added `gffread` package to Dockerfile for transcript extraction functionality
+
+**Removed:**
+- `remove_mirna_hairpin_from_fasta.py`: Replaced by `extract_transcripts_from_genome.py`
+- `concatenate_fasta.py`: No longer needed (use standard Unix tools like `cat`)
+
 ### v1.4.6 (2026-02-15) - Multiprocessing & I/O Optimizations
 
 **Multiprocessing Improvements:**
 - **chira_quantify.py**: Changed from `ThreadPoolExecutor` to `ProcessPoolExecutor` for EM algorithm (2-8x faster, bypasses Python GIL)
   - Parameter: `-t, --threads` (use 0 for all available cores)
-- **chira_merge.py**: Changed from `ThreadPoolExecutor` to `multiprocessing.Pool` for chromosome processing (4-8x faster)
+- **chira_merge.py**: Changed from `ThreadPoolExecutor` to chunk-based `multiprocessing.Pool` for transcript processing (4-8x faster)
   - Parameter changed: `-t, --threads` → `-p, --processes` (default: None, auto-detects CPU count)
-- **chira_map.py**: Enhanced with FASTA chunking and I/O bottleneck detection
+  - **Chunk-based strategy**: Groups transcripts into chunks (~1000 per chunk) to reduce overhead for very large datasets (e.g., 387K+ transcripts)
+- **chira_map.py**: Enhanced with FASTA chunking and intelligent process management
   - New parameter: `--chunk_fasta` for splitting large FASTA files into chunks
-  - Automatic I/O bottleneck detection with `psutil` (optional)
+  - **Process-aware chunking**: Parallel chunk execution automatically limited by available processes
+  - **Total processes control**: `--processes` now specifies total processes, automatically divided among jobs/chunks
   - CPU usage guidance based on system capabilities
 
 **I/O Performance Optimizations:**
@@ -46,7 +66,7 @@ See [CHANGELOG.md](CHANGELOG.md) for detailed change history.
 **Parallel Computing Support:**
 - **Multi-threading** in `chira_quantify.py`: EM algorithm parallelization (2-4x faster)
   - New parameter: `-t, --threads` (use 0 for all available cores)
-- **Multi-threading** in `chira_merge.py`: Chromosome processing parallelization (2-4x faster)
+  - **Multi-threading** in `chira_merge.py`: Transcript processing parallelization (2-4x faster, improved in v1.4.8 with chunk-based strategy)
   - New parameter: `-t, --threads` (use 0 for all available cores)
 - **Enhanced multi-threading** in `chira_map.py`: External tools (samtools, pysam, sort)
   - Automatic memory optimization with `psutil` (optional dependency)
@@ -56,7 +76,7 @@ See [CHANGELOG.md](CHANGELOG.md) for detailed change history.
 
 **Performance Improvements:**
 - **2-4x faster** EM algorithm with multi-threading for large datasets
-- **2-4x faster** chromosome processing with multi-threading
+- **2-4x faster** transcript processing with multi-threading (improved in v1.4.8 with chunk-based strategy for very large datasets)
 - **2-4x faster** BAM operations with multi-threaded tools
 - **2-4x faster** file sorting with GNU sort parallel support
 - **20-40% faster** I/O operations with optimized buffer sizes
@@ -269,7 +289,7 @@ extract_transcripts_from_genome.py -g target_transcriptome.gtf \
   -o target_transcriptome.fasta
 ```
 
-**1.6 Combine miRNA and target GTF (for annotation):**
+**1.5 Combine miRNA and target GTF (for annotation):**
 ```bash
 # Concatenate miRNA GTF with target GTF
 concatenate_gtf.py -m mature_mirna.gtf -t target_transcriptome.gtf \
@@ -324,12 +344,13 @@ chira_map.py -i collapsed_reads.fasta -o mapping_output \
 Merge overlapping alignments into loci:
 
 ```bash
-# Using 8 processes for parallel chromosome processing
+# Using 8 processes for parallel transcript processing
 chira_merge.py -b mapping_output/mapped.bed -o merge_output \
   -g combined_annotation.gtf -f1 ref1.fasta -f2 ref2.fasta \
   -ao 0.7 -so 0.7 -p 8
 
 # Auto-detect CPU count (default behavior)
+# Automatically creates optimal number of chunks based on transcript count
 chira_merge.py -b mapping_output/mapped.bed -o merge_output \
   -g combined_annotation.gtf -f1 ref1.fasta -f2 ref2.fasta \
   -ao 0.7 -so 0.7
@@ -427,7 +448,7 @@ echo "Step 3: Mapping reads..."
 chira_map.py -i collapsed.fasta -o mapping -f1 ref1.fasta -f2 ref2.fasta \
   -b -a bwa -s both -p 8
 
-# Step 4: Merge alignments (using 8 processes for parallelization)
+# Step 4: Merge alignments (using 8 processes for parallel transcript processing)
 echo "Step 4: Merging alignments..."
 chira_merge.py -b mapping/mapped.bed -o merge -g target_transcriptome.gtf \
   -f1 ref1.fasta -f2 ref2.fasta -ao 0.7 -so 0.7 -p 8
@@ -577,19 +598,47 @@ A split reference uses two separate reference FASTA files instead of one combine
 - `-s1, --align_score1`: Minimum alignment score for 1st iteration (default: 18)
 - `-s2, --align_score2`: Minimum alignment score for 2nd iteration (default: 16)
 - `-co, --chimeric_overlap`: Max bases between chimeric segments (default: 2)
-- `-p, --processes`: Number of parallel processes for external tools (default: 1)
+- `-p, --processes`: Total number of CPU processes/threads to use (default: auto-detects CPU count)
+  - **Automatic distribution**: The script automatically divides total processes among parallel BWA jobs
+    - **Without chunking**: Total processes divided among parallel BWA jobs (2-4 jobs depending on indices)
+    - **With chunking**: Total processes divided among parallel chunks, then each chunk uses its allocated processes
   - **Multi-threading**: Enables parallel processing for `samtools view`, `pysam.merge`, `pysam.sort`, and `sort` commands
   - **Performance**: 2-4x faster for large BAM files and sorting operations
   - **Memory optimization**: Use `--sort_memory` to specify memory per thread (e.g., "2G", "3G"), or install `psutil` for automatic optimization
+  - **Recommendation**: Set to total number of CPU cores for optimal performance
 - `--sort_memory`: Memory per thread for BAM sorting (e.g., "2G", "3G", optional)
   - If not specified, automatically calculates based on available RAM (requires `psutil`)
   - Falls back to safe default (2GB per thread) if `psutil` unavailable
   - **Note**: Total memory used = sort_memory × processes, so ensure sufficient RAM
 - `--chunk_fasta`: Split input FASTA into N chunks for parallel processing (optional, recommended for very large files >1GB)
-  - Better I/O performance and memory efficiency for large datasets
-  - Each chunk is processed independently, then results are merged
-  - **I/O bottleneck detection**: Automatically detects I/O bottlenecks during chunk processing (requires `psutil`)
-  - **CPU guidance**: Provides recommendations for optimal `--processes` setting based on system capabilities
+  - **How it works**: 
+    - Creates N chunks from the input FASTA file
+    - Processes chunks in batches, with parallel execution controlled by `--parallel_chunks` (default: 2)
+    - Each chunk processes all BWA jobs sequentially
+    - Remaining chunks are processed in subsequent batches automatically
+  - **Example 1**: `--chunk_fasta 10 --processes 32 --parallel_chunks 2` (default)
+    - Creates 10 chunks from FASTA
+    - Runs 2 chunks in parallel (16 processes each, using all 32 processes)
+    - Processes remaining 8 chunks in subsequent batches of 2
+  - **Example 2**: `--chunk_fasta 10 --processes 32 --parallel_chunks 4`
+    - Creates 10 chunks from FASTA
+    - Runs 4 chunks in parallel (8 processes each, using all 32 processes)
+    - Processes remaining 6 chunks in subsequent batches of 4
+  - **Benefits**: Better I/O performance and memory efficiency for large datasets
+  - Each chunk is processed independently through all BWA jobs, then results are merged
+- `--parallel_chunks`: Number of chunks to process simultaneously when using `--chunk_fasta` (default: 2)
+  - **How to set**: Based on available memory and CPU resources
+    - **Default: 2** (recommended for most systems)
+    - Small systems (<16 cores, <32GB RAM): `--parallel_chunks 1`
+    - Medium systems (16-32 cores, 32-64GB RAM): `--parallel_chunks 2` (default)
+    - Large systems (>32 cores, >64GB RAM): `--parallel_chunks 2-4`
+    - Very large systems (>64 cores, >128GB RAM): `--parallel_chunks 4-8`
+  - **Memory consideration**: Each chunk needs ~2-4GB RAM, so total memory ≈ `parallel_chunks × 4GB`
+  - **CPU consideration**: Processes per chunk = `--processes / --parallel_chunks`
+    - Each chunk should get at least 4 processes for optimal BWA performance
+    - Example: `--processes 32 --parallel_chunks 4` → 8 processes per chunk (good)
+    - Example: `--processes 8 --parallel_chunks 4` → 2 processes per chunk (too few, will auto-reduce)
+  - **Note**: Only takes effect when `--chunk_fasta` is specified
 
 **Outputs:**
 - `sorted.bam`: Sorted BAM file
@@ -598,22 +647,74 @@ A split reference uses two separate reference FASTA files instead of one combine
 
 **Usage Example:**
 ```bash
-# Basic usage with 8 processes
+# Basic usage with 32 total processes (automatically divided among BWA jobs)
 chira_map.py -i reads.fasta -o output_dir \
-   -f1 ref1.fasta -f2 ref2.fasta -a bwa -s both -p 8
+   -f1 ref1.fasta -f2 ref2.fasta -a bwa -s both -p 32
 
-# Use all available CPU cores automatically
+# Use all available CPU cores automatically (default behavior)
 chira_map.py -i reads.fasta -o output_dir \
-   -f1 ref1.fasta -f2 ref2.fasta -a bwa -s both -p 0
+   -f1 ref1.fasta -f2 ref2.fasta -a bwa -s both
 
 # With manual memory specification for BAM sorting
 chira_map.py -i reads.fasta -o output_dir \
    -f1 ref1.fasta -f2 ref2.fasta -a bwa -s both -p 8 --sort_memory 3G
 
 # For very large FASTA files (>1GB), use chunking for better I/O performance
+# Creates 10 chunks, processes them in batches (default: 2 chunks at a time)
 chira_map.py -i large_reads.fasta -o output_dir \
-   -f1 ref1.fasta -f2 ref2.fasta -a bwa -s both -p 8 --chunk_fasta 10
+   -f1 ref1.fasta -f2 ref2.fasta -a bwa -s both -p 32 --chunk_fasta 10
+
+# Example 1: Default behavior (2 chunks in parallel)
+# - Creates 10 chunks from FASTA
+# - Runs 2 chunks in parallel (16 processes each, using all 32 processes)
+# - Processes remaining 8 chunks in subsequent batches of 2
+
+# Example 2: Custom parallel chunks (4 chunks in parallel)
+# - Creates 10 chunks from FASTA
+# - Runs 4 chunks in parallel (8 processes each, using all 32 processes)
+# - Processes remaining 6 chunks in subsequent batches of 4
+chira_map.py -i large_reads.fasta -o output_dir \
+   -f1 ref1.fasta -f2 ref2.fasta -a bwa -s both -p 32 --chunk_fasta 10 --parallel_chunks 4
 ```
+
+**Understanding Chunking and Process Management:**
+
+When using `--chunk_fasta`, the script uses a two-stage approach:
+
+1. **FASTA Splitting**: The input FASTA is split into N chunks (as specified by `--chunk_fasta`)
+   - Each chunk contains a subset of reads distributed round-robin
+   - Chunks are typically 1-3GB each for optimal I/O performance
+
+2. **Parallel Processing**: Chunks are processed in batches, with parallelism controlled by `--parallel_chunks` (default: 2)
+   - Number of chunks running simultaneously is set by `--parallel_chunks` (default: 2)
+   - Processes per chunk = `--processes / --parallel_chunks`
+   - Each chunk should get at least 4 processes for optimal BWA performance
+   - If processes per chunk < 4, the number of parallel chunks is automatically reduced
+   - Example: 32 processes with `--parallel_chunks 2` → 2 chunks run in parallel (16 processes each)
+   - Example: 32 processes with `--parallel_chunks 4` → 4 chunks run in parallel (8 processes each)
+   - Example: 8 processes with `--parallel_chunks 2` → 1 chunk runs at a time (8 processes each, auto-reduced)
+
+3. **Batch Processing**: If you have more chunks than `--parallel_chunks`, remaining chunks are processed in subsequent batches
+   - Example: 10 chunks with `--parallel_chunks 2` → batches of 2: (2, 2, 2, 2, 2)
+   - Example: 10 chunks with `--parallel_chunks 4` → batches of 4: (4, 4, 2)
+   - Example: 10 chunks with `--parallel_chunks 1` → batches of 1: (1, 1, 1, 1, 1, 1, 1, 1, 1, 1)
+
+**Why This Approach:**
+- **Prevents oversubscription**: Won't try to run more chunks than you have processes for
+- **Efficient resource use**: All available processes are utilized without waste
+- **Better I/O**: Chunking still provides I/O benefits even with limited parallelism
+- **User control**: Adjust `--parallel_chunks` to match your system's memory and CPU resources
+- **Automatic fallback**: If processes per chunk < 4, automatically reduces parallel chunks
+
+**Recommendations:**
+- For large files (>1GB): Use `--chunk_fasta 10-20` to create manageable chunks
+- Set `--processes` to your total CPU core count for optimal performance
+- Set `--parallel_chunks` based on your system:
+  - **Small systems** (<16 cores, <32GB RAM): `--parallel_chunks 1`
+  - **Medium systems** (16-32 cores, 32-64GB RAM): `--parallel_chunks 2` (default)
+  - **Large systems** (>32 cores, >64GB RAM): `--parallel_chunks 2-4`
+  - **Very large systems** (>64 cores, >128GB RAM): `--parallel_chunks 4-8`
+- Ensure each chunk gets at least 4 processes: `--processes / --parallel_chunks >= 4`
 
 ---
 
@@ -646,10 +747,12 @@ chira_map.py -i large_reads.fasta -o output_dir \
 - `-ls, --min_locus_size`: Minimum alignments per merged locus (default: 1)
 - `-bb, --block_based`: Use Blockbuster for block-based merging
 - Blockbuster parameters: `-d, --distance`, `-mc, --min_cluster_height`, `-mb, --min_block_height`, `-sc, --scale`
-- `-p, --processes`: Number of parallel processes for chromosome processing (default: None, auto-detects CPU count)
-  - **Multiprocessing**: Uses `multiprocessing.Pool` to parallelize chromosome processing (bypasses Python GIL)
-  - **Performance**: 4-8x faster for datasets with many chromosomes
+- `-p, --processes`: Number of parallel processes for transcript processing (default: None, auto-detects CPU count)
+  - **Chunk-based multiprocessing**: Groups transcripts into chunks (~1000 transcripts per chunk) and processes chunks in parallel
+  - **Scalability**: Efficiently handles very large datasets (e.g., human genome with 387K+ transcripts)
+  - **Performance**: 4-8x faster for datasets with many transcripts
   - **Note**: Changed from `-t, --threads` in v1.4.6 to reflect multiprocessing implementation
+  - **Optimization**: For human genome (387K transcripts), creates ~388 manageable chunks instead of processing each transcript individually, reducing overhead significantly
 
 **Outputs:**
 - `segments.bed`: A BED file with reads categorized into segments

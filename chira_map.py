@@ -10,8 +10,8 @@ import multiprocessing
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# Optional dependency for I/O bottleneck detection and memory calculations
-# If not available, detection will be disabled and safe defaults will be used
+# Optional dependency for memory calculations
+# If not available, safe defaults will be used
 try:
     import psutil
     PSUTIL_AVAILABLE = True
@@ -423,6 +423,23 @@ def clan_to_bed(outdir):
                                         "1", "+"]) + "\n")
 
 
+def calculate_per_job_processes(total_processes, num_parallel_units):
+    """
+    Calculate number of processes per BWA alignment job based on total processes.
+    
+    Args:
+        total_processes: Total number of processes specified by user
+        num_parallel_units: Number of parallel units (jobs or chunks) that will run simultaneously
+    
+    Returns:
+        int: Number of processes to use per BWA alignment job (minimum 1)
+    """
+    if num_parallel_units <= 0:
+        return max(1, total_processes)
+    per_job = max(1, total_processes // num_parallel_units)
+    return per_job
+
+
 def parse_arguments():
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description='Chimeric Read Annotator: map reads to the reference',
@@ -453,44 +470,32 @@ def parse_arguments():
     parser.add_argument("-b", '--build', action='store_true', dest='build_index',
                         help="Build indices from reference fasta files")
 
-    parser.add_argument('-p', '--processes', action='store', type=int, default=1, metavar='',
+    parser.add_argument('-p', '--processes', action='store', type=int, default=None, metavar='',
                         dest='processes',
-                        help='''Number of threads per BWA alignment job.
+                        help='''Total number of CPU processes/threads to use across all BWA alignment jobs.
 
-IMPORTANT: Thread usage depends on whether chunking is enabled:
+HOW TO SET --processes:
+- GENERAL RULE: Set to the total number of CPU cores available on your system
+  * Example: 32-core system → --processes 32
+  * Example: 16-core system → --processes 16
+  * Example: 8-core system → --processes 8
+- DEFAULT: If not specified, uses all available CPU cores (auto-detected)
+- For shared systems: Set to number of cores allocated to your job
+- For memory-constrained systems: Reduce if you encounter out-of-memory errors
 
-WITHOUT CHUNKING (--chunk_fasta not set):
-- Multiple BWA jobs run simultaneously:
+HOW IT WORKS:
+- WITHOUT CHUNKING: Total processes are divided among parallel BWA jobs
   * 2 jobs if only index1 is used (long + short)
   * 4 jobs if both index1 and index2 are used (long + short × 2 indices)
-- Total CPU threads = number_of_jobs × --processes
-- Example: 4 jobs, --processes 8 → 32 total threads
+  * Example: 32 processes, 4 jobs → 8 processes per job (32 total)
+- WITH CHUNKING: Total processes are divided among parallel chunks (controlled by --parallel_chunks, default: 2)
+  * Example: 32 processes, --parallel_chunks 2 → 16 processes per chunk
+  * Example: 32 processes, --parallel_chunks 4 → 8 processes per chunk
+  * Each chunk processes jobs sequentially using all allocated processes
+  * With <16 processes: Only 1 chunk runs at a time
 
-WITH CHUNKING (--chunk_fasta N):
-- Multiple chunks run in parallel (up to N chunks simultaneously)
-- Each chunk processes alignment jobs sequentially
-- Total CPU threads = num_parallel_chunks × --processes
-- Example: 10 chunks (all parallel), --processes 4 → 40 total threads
-- Note: Only one alignment job per chunk runs at a time, but multiple chunks
-  run simultaneously, so total threads = parallel_chunks × threads_per_job
-
-Recommendations WITHOUT chunking:
-- For systems with many cores: set --processes = total_cores / number_of_jobs
-  Example: 32 cores, 4 jobs → --processes 8 (total: 32 threads)
-- For systems with limited cores: set --processes 2-4 per job
-  Example: 16 cores, 4 jobs → --processes 4 (total: 16 threads)
-
-Recommendations WITH chunking:
-- For systems with many cores: set --processes = total_cores / num_chunks
-  Example: 32 cores, 10 chunks → --processes 3 (total: 30 threads, ~1 per core)
-- For systems with limited cores: set --processes 2-4 per chunk
-  Example: 16 cores, 10 chunks → --processes 1-2 (total: 10-20 threads)
-- Consider I/O bandwidth: More parallel chunks = more I/O contention
-  If I/O is the bottleneck, reduce --processes or --chunk_fasta
-
-Default (1) is conservative but slow - increase for better performance.
-Each BWA job will use this many threads internally. Monitor system load
-and adjust if the system becomes overloaded.''')
+Note: This controls BWA alignment threads. Samtools operations (merge, sort)
+may use additional threads based on available resources.''')
 
     parser.add_argument('--sort_memory', action='store', type=str, default=None, metavar='',
                         dest='sort_memory',
@@ -581,42 +586,83 @@ and adjust if the system becomes overloaded.''')
     parser.add_argument('--chunk_fasta', action='store', type=int, default=None, metavar='',
                         dest='chunk_fasta',
                         help='''Split input FASTA into N chunks for parallel processing (recommended for large files >1GB).
-                        
-This strategy improves performance and memory efficiency for very large datasets:
-- Better I/O: Each chunk reads from different parts of the file, reducing contention
-- Lower memory: Each BWA job processes smaller chunks
-- Better scalability: Can process chunks in parallel
 
-Recommendations:
-- For 10GB file with 100M reads: use --chunk_fasta 10 (creates ~1GB chunks)
-- For smaller files: leave unset (no chunking, uses original parallel strategy)
-- Optimal chunk size: 1-3GB per chunk for best I/O performance
+HOW TO SET --chunk_fasta:
+- GENERAL RULE: Set based on input file size to create 1-3GB chunks
+  * Small files (<1GB): Leave unset (no chunking needed)
+  * Medium files (1-10GB): --chunk_fasta 5-10 (creates ~1-2GB chunks)
+  * Large files (10-50GB): --chunk_fasta 10-20 (creates ~2-5GB chunks)
+  * Very large files (>50GB): --chunk_fasta 20-50 (creates ~1-2.5GB chunks)
+- FORMULA: N ≈ input_file_size_GB / desired_chunk_size_GB
+  * Example: 20GB file, want 2GB chunks → --chunk_fasta 10
+  * Example: 5GB file, want 1GB chunks → --chunk_fasta 5
+- OPTIMAL CHUNK SIZE: 1-3GB per chunk for best I/O performance
+- More chunks = better I/O parallelism but more overhead
+- Fewer chunks = less overhead but larger memory usage per chunk
 
-When chunking is enabled, each chunk is processed through all BWA jobs,
-then chunk BAMs are merged efficiently using samtools merge.
+HOW IT WORKS:
+1. FASTA is split into N chunks (as specified by --chunk_fasta)
+2. Chunks are processed in batches (number controlled by --parallel_chunks, default: 2)
+3. Each chunk processes all BWA jobs sequentially
+4. Remaining chunks are processed in subsequent batches
 
-DETECTING I/O BOTTLENECKS:
-AUTOMATIC DETECTION:
-- The program automatically monitors I/O during chunk processing (if psutil is installed)
-- Warnings will be displayed if an I/O bottleneck is detected
-- Install psutil (pip install psutil) to enable automatic detection
+EXECUTION WITH CHUNKING:
+- Number of parallel chunks is controlled by --parallel_chunks (default: 2)
+- Processes per chunk = --processes / --parallel_chunks
+- Example: --chunk_fasta 10 --processes 32 --parallel_chunks 2 → 2 chunks at a time (16 processes each)
+- Example: --chunk_fasta 10 --processes 32 --parallel_chunks 4 → 4 chunks at a time (8 processes each)
+- If processes per chunk < 4, the number of parallel chunks is automatically reduced
 
-MANUAL MONITORING:
-If I/O is the bottleneck, you may see:
-- High disk I/O wait time (check with: iostat -x 1 or iotop)
-- Low CPU usage (<50%) despite many threads
-- Slow progress even with high --processes values
-- Disk read/write rates near maximum (check with: iostat or dstat)
+BENEFITS:
+- Better I/O: Each chunk reads from different parts of the file, reducing disk contention
+- Lower memory: Each BWA job processes smaller chunks, reducing peak memory usage
+- Resource management: Control parallel chunks with --parallel_chunks to match your system resources
+- Each BWA job gets processes based on --processes / --parallel_chunks
 
-Solutions if I/O is the bottleneck:
-- Reduce --chunk_fasta (fewer parallel chunks = less I/O contention)
+WHEN TO USE CHUNKING:
+- Use chunking for: Large files (>1GB), memory-constrained systems, I/O bottlenecks
+- Skip chunking for: Small files (<1GB), systems with abundant memory
+
+If I/O performance is a concern:
+- Monitor disk I/O wait time with: iostat -x 1 or iotop
+- If I/O is the bottleneck, reduce --chunk_fasta (fewer chunks = less I/O contention)
 - Reduce --processes (fewer threads per chunk = less I/O per chunk)
-- Use faster storage (SSD instead of HDD, faster network storage)
-- Ensure input/output files are on different physical drives if possible''')
+- Use faster storage (SSD instead of HDD, faster network storage)''')
+
+    parser.add_argument('--parallel_chunks', action='store', type=int, default=2, metavar='',
+                        dest='parallel_chunks',
+                        help='''Number of chunks to process simultaneously when using --chunk_fasta.
+
+HOW TO SET --parallel_chunks:
+- GENERAL RULE: Set based on available memory and CPU resources
+  * Default: 2 (recommended for most systems)
+  * Each chunk processes BWA jobs sequentially, so N chunks = N active BWA jobs
+  * Each BWA job needs 4-8 CPUs, so ensure: parallel_chunks × 4-8 ≤ --processes
+- RECOMMENDATIONS:
+  * Small systems (<16 cores, <32GB RAM): --parallel_chunks 1
+  * Medium systems (16-32 cores, 32-64GB RAM): --parallel_chunks 2 (default)
+  * Large systems (>32 cores, >64GB RAM): --parallel_chunks 2-4
+  * Very large systems (>64 cores, >128GB RAM): --parallel_chunks 4-8
+- MEMORY CONSIDERATION:
+  * More parallel chunks = more memory usage
+  * Each chunk needs memory for BWA alignment (typically 2-4GB per chunk)
+  * Total memory ≈ parallel_chunks × 4GB (approximate)
+- CPU CONSIDERATION:
+  * Processes per chunk = --processes / --parallel_chunks
+  * Each chunk should get at least 4 processes for optimal BWA performance
+  * Example: --processes 32 --parallel_chunks 4 → 8 processes per chunk (good)
+  * Example: --processes 8 --parallel_chunks 4 → 2 processes per chunk (too few)
+
+Note: This parameter only takes effect when --chunk_fasta is specified.''')
 
     parser.add_argument('-v', '--version', action='version', version='%(prog)s 1.4.4')
 
-    return parser.parse_args()
+    args = parser.parse_args()
+    # Set default processes to CPU count if not specified
+    if args.processes is None:
+        args.processes = multiprocessing.cpu_count()
+    
+    return args
 
 
 def validate_arguments(args):
@@ -639,226 +685,43 @@ def print_cpu_guidance(args):
     try:
         cpu_count = multiprocessing.cpu_count()
         
+        # Set default if not specified
+        total_processes = args.processes if args.processes is not None else cpu_count
+        
         if args.chunk_fasta and args.chunk_fasta > 1:
             # CHUNKING MODE: Multiple chunks run in parallel
             # Each chunk processes alignment jobs sequentially
-            # Total threads = num_parallel_chunks × --processes
-            num_parallel_chunks = args.chunk_fasta  # All chunks can run in parallel (limited by max_workers)
-            total_threads = num_parallel_chunks * args.processes
+            # Use user-specified parallel_chunks (default 2), limited by number of chunks
+            num_parallel_chunks = min(args.parallel_chunks, args.chunk_fasta)
+            per_chunk_processes = calculate_per_job_processes(total_processes, num_parallel_chunks)
             
             num_job_types = 2  # Default: long + short
             if args.idx2 or (args.build_index and args.ref_fasta2):
                 num_job_types = 4  # long + short × 2 indices
             
-            if args.processes == 1:  # Default value
-                # Suggest optimal value for chunking
-                suggested_processes = max(1, cpu_count // num_parallel_chunks)
-                print(f"NOTE: --processes is set to 1 (default) with chunking enabled.", file=sys.stderr)
-                print(f"      With {num_parallel_chunks} parallel chunks, consider using --processes {suggested_processes}", file=sys.stderr)
-                print(f"      This would use {num_parallel_chunks * suggested_processes} total threads on your {cpu_count}-core system.", file=sys.stderr)
-                print(f"      Each chunk processes {num_job_types} alignment jobs sequentially.", file=sys.stderr)
-            elif total_threads > cpu_count * 1.5:
-                # Warn if using too many threads
-                print(f"WARNING: With {num_parallel_chunks} parallel chunks × {args.processes} threads = {total_threads} total threads", file=sys.stderr)
-                print(f"         on a {cpu_count}-core system. This may cause CPU oversubscription.", file=sys.stderr)
-                print(f"         Consider reducing --processes to {max(1, cpu_count // num_parallel_chunks)} or reducing --chunk_fasta.", file=sys.stderr)
-            else:
-                # Confirm good setting
-                print(f"INFO: Using {num_parallel_chunks} parallel chunks × {args.processes} threads = {total_threads} total threads", file=sys.stderr)
-                print(f"      on {cpu_count}-core system (good configuration).", file=sys.stderr)
-                print(f"      Each chunk processes {num_job_types} alignment jobs sequentially.", file=sys.stderr)
+            print(f"INFO: Using {total_processes} total processes across {num_parallel_chunks} parallel chunks", file=sys.stderr)
+            print(f"      → {per_chunk_processes} processes per chunk (on {cpu_count}-core system)", file=sys.stderr)
+            print(f"      Each chunk processes {num_job_types} alignment jobs sequentially.", file=sys.stderr)
+            
+            if total_processes > cpu_count * 1.5:
+                print(f"WARNING: Total processes ({total_processes}) exceeds system cores ({cpu_count})", file=sys.stderr)
+                print(f"         Consider reducing --processes or --chunk_fasta.", file=sys.stderr)
         else:
             # NON-CHUNKING MODE: Multiple alignment jobs run in parallel
-            # Total threads = num_jobs × --processes
             num_jobs = 2  # Default: long + short with index1
             if args.idx2 or (args.build_index and args.ref_fasta2):
                 num_jobs = 4  # long + short × 2 indices
             
-            total_threads = num_jobs * args.processes
+            per_job_processes = calculate_per_job_processes(total_processes, num_jobs)
             
-            if args.processes == 1:  # Default value
-                # Suggest optimal value
-                suggested_processes = max(2, cpu_count // num_jobs)
-                print(f"NOTE: --processes is set to 1 (default).", file=sys.stderr)
-                print(f"      With {num_jobs} parallel BWA jobs, consider using --processes {suggested_processes}", file=sys.stderr)
-                print(f"      This would use {num_jobs * suggested_processes} total threads on your {cpu_count}-core system.", file=sys.stderr)
-            elif total_threads > cpu_count * 1.5:
-                # Warn if using too many threads
-                print(f"WARNING: With {num_jobs} jobs × {args.processes} threads = {total_threads} total threads", file=sys.stderr)
-                print(f"         on a {cpu_count}-core system. This may cause CPU oversubscription.", file=sys.stderr)
-                print(f"         Consider reducing --processes to {max(2, cpu_count // num_jobs)}.", file=sys.stderr)
-            else:
-                # Confirm good setting
-                print(f"INFO: Using {num_jobs} parallel jobs × {args.processes} threads = {total_threads} total threads", file=sys.stderr)
-                print(f"      on {cpu_count}-core system (good configuration).", file=sys.stderr)
+            print(f"INFO: Using {total_processes} total processes across {num_jobs} parallel BWA jobs", file=sys.stderr)
+            print(f"      → {per_job_processes} processes per job (on {cpu_count}-core system)", file=sys.stderr)
+            
+            if total_processes > cpu_count * 1.5:
+                print(f"WARNING: Total processes ({total_processes}) exceeds system cores ({cpu_count})", file=sys.stderr)
+                print(f"         Consider reducing --processes.", file=sys.stderr)
     except Exception:
         pass
-
-
-def detect_io_bottleneck(sample_duration=5, sample_interval=1):
-    """
-    Automatically detect if the system is experiencing I/O bottlenecks.
-    
-    This function samples system metrics over a short period to detect I/O bottlenecks.
-    It checks CPU usage, I/O wait time, and disk utilization.
-    
-    Args:
-        sample_duration (int): How long to sample metrics in seconds (default: 5)
-        sample_interval (float): Interval between samples in seconds (default: 1)
-    
-    Returns:
-        dict: Dictionary with detection results:
-            - 'is_bottleneck' (bool): True if I/O bottleneck detected
-            - 'cpu_percent' (float): Average CPU usage percentage
-            - 'iowait_percent' (float): Average I/O wait percentage (if available)
-            - 'warnings' (list): List of warning messages
-            - 'suggestions' (list): List of suggestions
-    """
-    if not PSUTIL_AVAILABLE:
-        return {
-            'is_bottleneck': False,
-            'cpu_percent': None,
-            'iowait_percent': None,
-            'warnings': ['psutil not available - cannot detect I/O bottlenecks automatically'],
-            'suggestions': ['Install psutil (pip install psutil) for automatic I/O bottleneck detection']
-        }
-    
-    try:
-        cpu_samples = []
-        iowait_samples = []
-        num_samples = max(2, int(sample_duration / sample_interval))  # Need at least 2 samples for iowait calculation
-        
-        # Get initial CPU times snapshot (for iowait calculation on Linux)
-        prev_cpu_times = None
-        if hasattr(psutil, 'cpu_times'):
-            prev_cpu_times = psutil.cpu_times()
-        
-        # Sample system metrics
-        for i in range(num_samples):
-            # Get CPU usage percentage
-            cpu_percent = psutil.cpu_percent(interval=sample_interval)
-            cpu_samples.append(cpu_percent)
-            
-            # Try to calculate iowait (Linux only, not available on macOS/Windows)
-            # iowait requires comparing two cpu_times snapshots
-            if prev_cpu_times is not None and hasattr(prev_cpu_times, 'iowait'):
-                curr_cpu_times = psutil.cpu_times()
-                # Calculate time differences
-                iowait_diff = curr_cpu_times.iowait - prev_cpu_times.iowait
-                total_diff = sum([
-                    curr_cpu_times.user - prev_cpu_times.user,
-                    curr_cpu_times.nice - prev_cpu_times.nice,
-                    curr_cpu_times.system - prev_cpu_times.system,
-                    curr_cpu_times.idle - prev_cpu_times.idle,
-                    curr_cpu_times.iowait - prev_cpu_times.iowait
-                ])
-                if total_diff > 0:
-                    iowait_percent = (iowait_diff / total_diff) * 100
-                    iowait_samples.append(iowait_percent)
-                prev_cpu_times = curr_cpu_times
-            elif prev_cpu_times is None:
-                # First sample - get baseline
-                prev_cpu_times = psutil.cpu_times() if hasattr(psutil, 'cpu_times') else None
-        
-        avg_cpu = sum(cpu_samples) / len(cpu_samples) if cpu_samples else 0
-        avg_iowait = sum(iowait_samples) / len(iowait_samples) if iowait_samples else None
-        
-        warnings = []
-        suggestions = []
-        is_bottleneck = False
-        
-        # Detection criteria
-        if avg_iowait is not None:
-            if avg_iowait > 30:
-                is_bottleneck = True
-                warnings.append(f"High I/O wait detected: {avg_iowait:.1f}% (threshold: >30%)")
-                suggestions.append("Reduce --chunk_fasta to decrease parallel I/O load")
-                suggestions.append("Reduce --processes to decrease I/O per chunk")
-            elif avg_iowait > 20:
-                warnings.append(f"Moderate I/O wait: {avg_iowait:.1f}% (threshold: >20%)")
-                suggestions.append("Consider reducing --chunk_fasta or --processes if performance is slow")
-        
-        # Check CPU usage vs I/O wait
-        if avg_iowait is not None and avg_cpu < 50 and avg_iowait > 15:
-            is_bottleneck = True
-            warnings.append(f"Low CPU usage ({avg_cpu:.1f}%) with I/O wait ({avg_iowait:.1f}%) suggests I/O bottleneck")
-            suggestions.append("System is waiting for I/O - reduce parallel I/O operations")
-        
-        # Check if CPU is low but we can't measure iowait (macOS/Windows)
-        if avg_iowait is None and avg_cpu < 40:
-            warnings.append(f"Low CPU usage ({avg_cpu:.1f}%) may indicate I/O bottleneck (iowait not measurable on this system)")
-            suggestions.append("Monitor I/O manually using: iostat -x 1 (Linux) or Activity Monitor (macOS)")
-        
-        return {
-            'is_bottleneck': is_bottleneck,
-            'cpu_percent': avg_cpu,
-            'iowait_percent': avg_iowait,
-            'warnings': warnings,
-            'suggestions': suggestions
-        }
-    except Exception as e:
-        return {
-            'is_bottleneck': False,
-            'cpu_percent': None,
-            'iowait_percent': None,
-            'warnings': [f'Error detecting I/O bottleneck: {str(e)}'],
-            'suggestions': ['Monitor I/O manually using system tools']
-        }
-
-
-def print_io_monitoring_guidance(args):
-    """Print guidance on how to monitor I/O performance when chunking is enabled."""
-    if args.chunk_fasta and args.chunk_fasta > 1:
-        print("", file=sys.stderr)
-        print("=" * 70, file=sys.stderr)
-        print("I/O MONITORING GUIDANCE (chunking enabled)", file=sys.stderr)
-        print("=" * 70, file=sys.stderr)
-        print("", file=sys.stderr)
-        
-        # Check if automatic detection is available
-        if PSUTIL_AVAILABLE:
-            print("✓ Automatic I/O bottleneck detection: ENABLED", file=sys.stderr)
-            print("  The program will automatically monitor I/O during chunk processing", file=sys.stderr)
-            print("  and warn you if an I/O bottleneck is detected.", file=sys.stderr)
-            print("", file=sys.stderr)
-        else:
-            print("⚠ Automatic I/O bottleneck detection: DISABLED (psutil not available)", file=sys.stderr)
-            print("  Install psutil (pip install psutil) for automatic detection.", file=sys.stderr)
-            print("  Otherwise, use manual monitoring methods below.", file=sys.stderr)
-            print("", file=sys.stderr)
-        
-        print("Manual monitoring - How to detect if I/O is the bottleneck:", file=sys.stderr)
-        print("", file=sys.stderr)
-        print("1. Monitor disk I/O wait time:", file=sys.stderr)
-        print("   Command: iostat -x 1", file=sys.stderr)
-        print("   Look for: %iowait > 20-30% indicates I/O bottleneck", file=sys.stderr)
-        print("", file=sys.stderr)
-        print("2. Monitor disk utilization:", file=sys.stderr)
-        print("   Command: iostat -x 1  or  dstat -d", file=sys.stderr)
-        print("   Look for: %util near 100% indicates disk saturation", file=sys.stderr)
-        print("", file=sys.stderr)
-        print("3. Monitor CPU vs I/O wait:", file=sys.stderr)
-        print("   Command: top  or  htop", file=sys.stderr)
-        print("   Look for: Low CPU usage (<50%) + high I/O wait = I/O bottleneck", file=sys.stderr)
-        print("", file=sys.stderr)
-        print("4. Monitor disk read/write rates:", file=sys.stderr)
-        print("   Command: iostat -x 1  or  iotop", file=sys.stderr)
-        print("   Look for: Read/write rates near disk maximum (check disk specs)", file=sys.stderr)
-        print("", file=sys.stderr)
-        print("Signs of I/O bottleneck:", file=sys.stderr)
-        print("  ✓ High %iowait (>20-30%)", file=sys.stderr)
-        print("  ✓ Low CPU usage despite many threads", file=sys.stderr)
-        print("  ✓ Disk utilization near 100%", file=sys.stderr)
-        print("  ✓ Slow progress even with high --processes", file=sys.stderr)
-        print("", file=sys.stderr)
-        print("If I/O is the bottleneck, try:", file=sys.stderr)
-        print("  • Reduce --chunk_fasta (fewer parallel chunks)", file=sys.stderr)
-        print("  • Reduce --processes (fewer threads per chunk)", file=sys.stderr)
-        print("  • Use faster storage (SSD, faster network storage)", file=sys.stderr)
-        print("  • Place input/output on different physical drives", file=sys.stderr)
-        print("", file=sys.stderr)
-        print("=" * 70, file=sys.stderr)
-        print("", file=sys.stderr)
 
 
 def print_configuration(args):
@@ -875,7 +738,8 @@ def print_configuration(args):
         print('1st priority reference fasta file    : ' + args.ref_fasta1)
     if args.ref_fasta2:
         print('2nd priority reference fasta file    : ' + args.ref_fasta2)
-    print('Number of processes                  : ' + str(args.processes))
+    total_processes = args.processes if args.processes is not None else multiprocessing.cpu_count()
+    print('Total number of processes            : ' + str(total_processes) + (' (auto-detected)' if args.processes is None else ''))
     print('Stranded                             : ' + args.stranded)
     print('Seed length                          : ' + str(args.seed_length1))
     if args.seed_length2:
@@ -960,26 +824,29 @@ def run_bwa_mapping_with_chunking(args, index1, index2):
     └─────────────────────────────────────────────────────────────────────────┘
     
     ┌─────────────────────────────────────────────────────────────────────────┐
-    │ STEP 2: Process chunks in parallel (up to 10 chunks simultaneously)     │
+    │ STEP 2: Process chunks in parallel (N chunks simultaneously, controlled by --parallel_chunks) │
     │                                                                          │
-    │   Chunk 0 (parallel)    Chunk 1 (parallel)    ...    Chunk 9 (parallel) │
-    │   ┌──────────────┐      ┌──────────────┐              ┌──────────────┐ │
-    │   │ Job 1: long │      │ Job 1: long │              │ Job 1: long │ │
-    │   │ + index1    │      │ + index1    │              │ + index1    │ │
-    │   ├──────────────┤      ├──────────────┤              ├──────────────┤ │
-    │   │ Job 2: short│      │ Job 2: short│              │ Job 2: short│ │
-    │   │ + index1    │      │ + index1    │              │ + index1    │ │
-    │   ├──────────────┤      ├──────────────┤              ├──────────────┤ │
-    │   │ Job 3: long │      │ Job 3: long │              │ Job 3: long │ │
-    │   │ + index2    │      │ + index2    │              │ + index2    │ │
-    │   ├──────────────┤      ├──────────────┤              ├──────────────┤ │
-    │   │ Job 4: short│      │ Job 4: short│              │ Job 4: short│ │
-    │   │ + index2    │      │ + index2    │              │ + index2    │ │
-    │   └──────────────┘      └──────────────┘              └──────────────┘ │
-    │   (sequential)          (sequential)                  (sequential)      │
+    │   Batch 1: Chunk 0 (parallel)    Chunk 1 (parallel)                    │
+    │   ┌──────────────┐      ┌──────────────┐                              │
+    │   │ Job 1: long │      │ Job 1: long │                              │
+    │   │ + index1    │      │ + index1    │                              │
+    │   ├──────────────┤      ├──────────────┤                              │
+    │   │ Job 2: short│      │ Job 2: short│                              │
+    │   │ + index1    │      │ + index1    │                              │
+    │   ├──────────────┤      ├──────────────┤                              │
+    │   │ Job 3: long │      │ Job 3: long │                              │
+    │   │ + index2    │      │ + index2    │                              │
+    │   ├──────────────┤      ├──────────────┤                              │
+    │   │ Job 4: short│      │ Job 4: short│                              │
+    │   │ + index2    │      │ + index2    │                              │
+    │   └──────────────┘      └──────────────┘                              │
+    │   (sequential)          (sequential)                                    │
+    │                                                                          │
+    │   Batch 2: Chunk 2, Chunk 3 (after Batch 1 completes)                   │
+    │   ... (continues until all 10 chunks are processed)                     │
     │                                                                          │
     │   Total: 10 chunks × 4 jobs = 40 BWA alignment jobs                      │
-    │   Parallelism: Up to 10 chunks run simultaneously                       │
+    │   Parallelism: N chunks run simultaneously (N active BWA jobs, controlled by --parallel_chunks) │
     │   Within each chunk: 4 jobs run sequentially                           │
     └─────────────────────────────────────────────────────────────────────────┘
     
@@ -1006,20 +873,24 @@ def run_bwa_mapping_with_chunking(args, index1, index2):
     └─────────────────────────────────────────────────────────────────────────┘
     
     Key Points:
-    - Chunks run in PARALLEL (up to chunk_fasta chunks simultaneously)
+    - Chunks run in PARALLEL (number controlled by --parallel_chunks, default: 2)
     - Within each chunk, alignment jobs run SEQUENTIALLY (one after another)
+    - Each BWA job needs 4-8 CPUs, so N chunks = N active BWA jobs at a time
     - Total jobs = num_chunks × num_alignment_job_types
     - Each chunk produces one BAM file per alignment job type
     - Chunk BAMs are merged by job type to produce final BAMs
+    - Each job within a chunk uses all processes allocated to that chunk
+    - Processes per chunk = --processes / --parallel_chunks
+    - If processes per chunk < 4, the number of parallel chunks is automatically reduced
     
     Performance Benefits:
     - Better I/O: Each chunk reads from different parts of the file, reducing disk contention
     - Lower memory: Each BWA job processes smaller chunks, reducing peak memory usage
-    - Better scalability: Chunks can be processed in parallel across multiple cores/disks
+    - Resource management: Control parallel chunks with --parallel_chunks (default: 2) to match your system resources
     - For 10GB file with 150M reads:
       * Without chunking: Single large BWA job, high memory, sequential I/O
-      * With 10 chunks: 10 parallel chunks, ~10x lower memory per job, parallel I/O
-      * Expected speedup: 2-5x depending on I/O subsystem and available cores
+      * With 10 chunks (2 at a time): ~10x lower memory per job, parallel I/O, controlled resource usage
+      * Expected speedup: 2-3x depending on I/O subsystem and available cores
     """
     chira_utilities.print_w_time(f"START: Splitting FASTA into {args.chunk_fasta} chunks")
     chunk_dir = os.path.join(args.outdir, "chunks")
@@ -1038,12 +909,38 @@ def run_bwa_mapping_with_chunking(args, index1, index2):
     print(f"INFO: Each chunk will be processed through {num_job_types} alignment job types", file=sys.stderr)
     print(f"INFO: Total alignment jobs = {len(chunk_files)} chunks × {num_job_types} job types = {len(chunk_files) * num_job_types} jobs", file=sys.stderr)
     
+    # Calculate optimal number of parallel chunks based on user setting and available processes
+    # User can specify --parallel_chunks to control how many chunks run simultaneously
+    total_processes = args.processes if args.processes is not None else multiprocessing.cpu_count()
+    
+    # Use user-specified number of parallel chunks (default is 2)
+    # Limited by: user setting, number of chunks available, and available processes
+    num_parallel_chunks = min(args.parallel_chunks, len(chunk_files))
+    
+    # Calculate processes per chunk: divide total processes among parallel chunks
+    # This ensures each chunk gets enough processes (4-8) for BWA alignment
+    per_chunk_processes = calculate_per_job_processes(total_processes, num_parallel_chunks)
+    
+    # Ensure each chunk gets at least 4 processes (minimum for BWA)
+    if per_chunk_processes < 4:
+        # If we don't have enough processes for requested chunks, reduce number of parallel chunks
+        required_processes = args.parallel_chunks * 4
+        num_parallel_chunks = max(1, total_processes // 4)  # At least 1 chunk, at most what we can support
+        per_chunk_processes = calculate_per_job_processes(total_processes, num_parallel_chunks)
+        print(f"WARNING: Not enough processes for {args.parallel_chunks} chunks (need at least {required_processes}, have {total_processes}).", file=sys.stderr)
+        print(f"         Running {num_parallel_chunks} chunks in parallel instead ({per_chunk_processes} processes each).", file=sys.stderr)
+    
+    print(f"INFO: Using {total_processes} total processes across {num_parallel_chunks} parallel chunks → {per_chunk_processes} processes per chunk", file=sys.stderr)
+    print(f"INFO: Within each chunk, {num_job_types} alignment jobs will run sequentially (each job uses {per_chunk_processes} processes)", file=sys.stderr)
+    if num_parallel_chunks < len(chunk_files):
+        print(f"INFO: Processing {len(chunk_files)} total chunks in batches of {num_parallel_chunks} (limited to prevent resource exhaustion)", file=sys.stderr)
+    
     def process_chunk(chunk_file, chunk_idx):
         """
         Process a single chunk through all alignment jobs.
         
-        Execution: This function runs SEQUENTIALLY for each alignment job type within a chunk.
-        Multiple chunks can run this function in PARALLEL (controlled by ThreadPoolExecutor).
+        Execution: Alignment job types run SEQUENTIALLY within each chunk.
+        Multiple chunks can run in PARALLEL (controlled by ThreadPoolExecutor).
         
         Example for chunk_000:
           1. Run index1.long alignment on chunk_000.fasta → chunk_000_out/index1.long.bam
@@ -1058,7 +955,7 @@ def run_bwa_mapping_with_chunking(args, index1, index2):
         
         chunk_bams = {}
         # EXECUTION: Process each alignment job type SEQUENTIALLY for this chunk
-        # All alignment jobs for a chunk must complete before moving to the next chunk
+        # This prevents resource exhaustion when multiple chunks run in parallel
         for (align_type, index_type, refindex, seed_length, align_score,
              match_score, mismatch_score, gap_o, gap_e, n_aligns) in alignment_job_types:
             job_name = f"{index_type}.{align_type}"
@@ -1066,7 +963,7 @@ def run_bwa_mapping_with_chunking(args, index1, index2):
                 # Run BWA alignment for this job type on this chunk
                 align_with_bwa(align_type, index_type, chunk_file, refindex, chunk_outdir,
                               seed_length, align_score, match_score, mismatch_score,
-                              gap_o, gap_e, n_aligns, args.processes)
+                              gap_o, gap_e, n_aligns, per_chunk_processes)
                 chunk_bam = os.path.join(chunk_outdir, index_type + "." + align_type + ".bam")
                 chunk_bams[job_name] = chunk_bam
             except Exception as e:
@@ -1074,26 +971,31 @@ def run_bwa_mapping_with_chunking(args, index1, index2):
         
         return chunk_bams
     
-    # EXECUTION MODEL: Process all chunks in PARALLEL using ThreadPoolExecutor
+    # EXECUTION MODEL: Process chunks in PARALLEL using ThreadPoolExecutor
     # 
     # Parallelism Level:
-    # - Up to min(num_chunks, chunk_fasta) chunks can run simultaneously
-    # - Example: 10 chunks with chunk_fasta=10 → all 10 chunks run in parallel
-    # - Example: 10 chunks with chunk_fasta=5 → only 5 chunks run in parallel at a time
+    # - Number of parallel chunks is controlled by --parallel_chunks (default: 2)
+    # - Each BWA job needs 4-8 CPUs, so N chunks = N active BWA jobs at a time
+    # - Example: 32 processes, 10 chunks, --parallel_chunks 2 → 2 chunks in parallel (16 processes each)
+    # - Example: 32 processes, 10 chunks, --parallel_chunks 4 → 4 chunks in parallel (8 processes each)
+    # - Chunks are processed in batches (size controlled by --parallel_chunks) until all chunks are complete
     #
     # Within Each Chunk (SEQUENTIAL):
     # - All alignment job types run one after another
     # - Example: chunk_000 runs index1.long → index1.short → index2.long → index2.short
+    # - Each job uses all processes allocated to the chunk (per_chunk_processes)
     #
-    # Across Chunks (PARALLEL):
-    # - Multiple chunks can run simultaneously
-    # - Example: chunk_000, chunk_001, ..., chunk_009 all run at the same time
+    # Across Chunks (PARALLEL, controlled by --parallel_chunks):
+    # - Number of chunks running simultaneously is controlled by --parallel_chunks (default: 2)
+    # - Example: With 32 processes and --parallel_chunks 2, 2 chunks run in parallel (16 processes each)
+    # - Example: With 32 processes and --parallel_chunks 4, 4 chunks run in parallel (8 processes each)
+    # - Each chunk processes 4 jobs sequentially, so N active BWA jobs at any time (where N = --parallel_chunks)
     #
     # Performance Impact:
-    # - Sequential processing: 10 chunks × 4 jobs × 30 min = 20 hours total
-    # - Parallel processing: 10 chunks run simultaneously, each takes ~30 min = 30 min total
-    # - Speedup: ~40x for this example (depends on I/O bandwidth and CPU cores)
-    chira_utilities.print_w_time(f"START: Processing {len(chunk_files)} chunks in parallel (up to {min(len(chunk_files), args.chunk_fasta)} simultaneously)")
+    # - Sequential within chunk: 10 chunks × 4 jobs × 30 min = 20 hours total
+    # - Parallel chunks (N at a time): 10 chunks processed in batches of N = ~(10/N) × 30 min total
+    # - Speedup: ~Nx for this example (limited by --parallel_chunks to prevent resource exhaustion)
+    chira_utilities.print_w_time(f"START: Processing {len(chunk_files)} chunks in parallel (up to {num_parallel_chunks} simultaneously)")
     all_chunk_bams = {}  # Dictionary: job_name -> list of chunk BAM files
     
     def process_chunk_wrapper(chunk_info):
@@ -1106,49 +1008,15 @@ def run_bwa_mapping_with_chunking(args, index1, index2):
     # - Each chunk will be processed through all alignment job types
     # - Multiple chunks run in parallel (controlled by max_workers)
     # - Results are collected as they complete (as_completed)
-    with ThreadPoolExecutor(max_workers=min(len(chunk_files), args.chunk_fasta)) as executor:
-        # OPTIMIZATION: Automatically detect I/O bottlenecks during execution
-        # Wait a few seconds for processing to start, then sample system metrics
-        print("INFO: Monitoring system I/O during chunk processing...", file=sys.stderr)
-        time.sleep(3)  # Wait for processing to start
-        io_status = detect_io_bottleneck(sample_duration=5, sample_interval=1)
-        
-        if io_status['is_bottleneck']:
-            print("", file=sys.stderr)
-            print("⚠️  WARNING: I/O bottleneck detected during chunk processing!", file=sys.stderr)
-            print("=" * 70, file=sys.stderr)
-            if io_status['cpu_percent'] is not None:
-                print(f"   CPU usage: {io_status['cpu_percent']:.1f}%", file=sys.stderr)
-            if io_status['iowait_percent'] is not None:
-                print(f"   I/O wait: {io_status['iowait_percent']:.1f}%", file=sys.stderr)
-            for warning in io_status['warnings']:
-                print(f"   ⚠ {warning}", file=sys.stderr)
-            print("", file=sys.stderr)
-            print("   Suggestions:", file=sys.stderr)
-            for suggestion in io_status['suggestions']:
-                print(f"   • {suggestion}", file=sys.stderr)
-            print("=" * 70, file=sys.stderr)
-            print("", file=sys.stderr)
-        elif io_status['warnings']:
-            # Non-critical warnings
-            print("INFO: I/O monitoring results:", file=sys.stderr)
-            if io_status['cpu_percent'] is not None:
-                print(f"   CPU usage: {io_status['cpu_percent']:.1f}%", file=sys.stderr)
-            if io_status['iowait_percent'] is not None:
-                print(f"   I/O wait: {io_status['iowait_percent']:.1f}%", file=sys.stderr)
-            for warning in io_status['warnings']:
-                print(f"   ℹ {warning}", file=sys.stderr)
-            if io_status['suggestions']:
-                print("   Consider:", file=sys.stderr)
-                for suggestion in io_status['suggestions']:
-                    print(f"   • {suggestion}", file=sys.stderr)
-        # Extract chunk index from filename (e.g., "chunk_005.fasta" -> 5)
-        # This ensures chunk_idx matches the actual chunk file index, not enumerate position
-        def get_chunk_idx(chunk_file):
-            basename = os.path.basename(chunk_file)
-            # Extract number from "chunk_XXX.fasta" format
-            return int(basename.replace("chunk_", "").replace(".fasta", ""))
-        
+    
+    # Extract chunk index from filename (e.g., "chunk_005.fasta" -> 5)
+    # This ensures chunk_idx matches the actual chunk file index, not enumerate position
+    def get_chunk_idx(chunk_file):
+        basename = os.path.basename(chunk_file)
+        # Extract number from "chunk_XXX.fasta" format
+        return int(basename.replace("chunk_", "").replace(".fasta", ""))
+    
+    with ThreadPoolExecutor(max_workers=num_parallel_chunks) as executor:
         # Submit all chunk processing tasks to the executor
         # Each task will process one chunk through all alignment job types
         future_to_chunk = {executor.submit(process_chunk_wrapper, (chunk_file, get_chunk_idx(chunk_file))): 
@@ -1211,7 +1079,8 @@ def run_bwa_mapping_with_chunking(args, index1, index2):
             # Merge all chunk BAMs for this job type into a single final BAM
             # -@ processes enables multi-threaded compression during merge
             # For 10 chunks: 8 threads = 5-10x speedup vs single-threaded
-            pysam.merge("-f", "-@", str(max(1, args.processes)), final_bam, *chunk_bam_list)
+            total_processes = args.processes if args.processes is not None else multiprocessing.cpu_count()
+            pysam.merge("-f", "-@", str(max(1, total_processes)), final_bam, *chunk_bam_list)
         final_bams[job_name] = final_bam
     chira_utilities.print_w_time("END: Merged chunk BAM files")
     
@@ -1254,7 +1123,7 @@ def run_bwa_mapping_parallel(args, index1, index2):
     Performance Benefits:
     - Original sequential approach: 4 jobs × 2 hours = 8 hours total
     - Parallel approach: All 4 jobs run simultaneously = ~2 hours total (4x speedup)
-    - Each job uses args.processes threads internally, so total threads = jobs × processes
+    - Total processes are automatically divided among parallel jobs
     - For 4 jobs with 8 processes each: 32 total threads (good for 32+ core systems)
     - BWA jobs are I/O and CPU intensive, so parallel execution maximizes resource utilization
     
@@ -1281,6 +1150,11 @@ def run_bwa_mapping_parallel(args, index1, index2):
         alignment_jobs.append(("short", "index2", args.fasta, index2, args.seed_length2, args.align_score2,
                               args.match2, args.mismatch2, args.gapopen2, args.gapext2, args.nhits2))
     
+    # Calculate per-job processes (jobs run in parallel, so divide total by number of jobs)
+    total_processes = args.processes if args.processes is not None else multiprocessing.cpu_count()
+    per_job_processes = calculate_per_job_processes(total_processes, len(alignment_jobs))
+    print(f"INFO: Using {total_processes} total processes across {len(alignment_jobs)} parallel jobs → {per_job_processes} processes per job", file=sys.stderr)
+    
     # OPTIMIZATION: Run all alignment jobs in parallel using ThreadPoolExecutor
     # - All jobs run simultaneously instead of sequentially
     # - Total execution time = max(job_times) instead of sum(job_times)
@@ -1296,7 +1170,7 @@ def run_bwa_mapping_parallel(args, index1, index2):
             chira_utilities.print_w_time(f"START: {job_name} alignment")
             align_with_bwa(align_type, index_type, query_fasta, refindex, args.outdir,
                           seed_length, align_score, match_score, mismatch_score,
-                          gap_o, gap_e, n_aligns, args.processes)
+                          gap_o, gap_e, n_aligns, per_job_processes)
             chira_utilities.print_w_time(f"END: {job_name} alignment")
             return (job_name, True, None)
         except Exception as e:
@@ -1359,7 +1233,8 @@ def calculate_sort_memory(args):
     if PSUTIL_AVAILABLE:
         try:
             available_gb = psutil.virtual_memory().available / (1024**3)
-            num_processes = max(1, args.processes)
+            total_processes = args.processes if args.processes is not None else multiprocessing.cpu_count()
+            num_processes = max(1, total_processes)
             usable_gb = (available_gb - 2) / num_processes
             if usable_gb >= 2:
                 sort_memory_gb = min(3, int(usable_gb))
@@ -1393,7 +1268,8 @@ def merge_and_sort_bams(args, final_bams):
     # - For 4 BAM files totaling 50GB: 8 threads = 6-7x speedup vs single-threaded
     chira_utilities.print_w_time("START: Merge final BAM files")
     final_bam_list = list(final_bams.values())
-    pysam.merge("-f", "-@", str(max(1, args.processes)),
+    total_processes = args.processes if args.processes is not None else multiprocessing.cpu_count()
+    pysam.merge("-f", "-@", str(max(1, total_processes)),
                 os.path.join(args.outdir, "unsorted.bam"),
                 *final_bam_list)
     chira_utilities.print_w_time("END: Merge final BAM files")
@@ -1414,7 +1290,8 @@ def merge_and_sort_bams(args, final_bams):
     # - For 50GB BAM: 8 threads + 2G memory = 30-45 min vs 4-6 hours single-threaded
     chira_utilities.print_w_time("START: Sorting BAM file")
     sort_memory = calculate_sort_memory(args)
-    pysam.sort("-m", sort_memory, "-@", str(max(1, args.processes)), "-n",
+    total_processes = args.processes if args.processes is not None else multiprocessing.cpu_count()
+    pysam.sort("-m", sort_memory, "-@", str(max(1, total_processes)), "-n",
                os.path.join(args.outdir, "unsorted.bam"),
                "-T", os.path.join(args.outdir, "sorted"),
                "-o", os.path.join(args.outdir, "sorted.bam"))
@@ -1454,12 +1331,12 @@ def process_bed_file(args):
         # - Check version string to detect GNU sort
         # - Use parallel sort with number of threads equal to processes
         result = subprocess.run(["sort", "--version"], capture_output=True, text=True, timeout=2)
-        if "GNU coreutils" in result.stdout and args.processes > 0:
-            # OPTIMIZATION: Use parallel sort with number of threads equal to processes
+        if "GNU coreutils" in result.stdout:
+            # OPTIMIZATION: Use parallel sort with number of threads equal to total processes
             # - Parallel sort distributes sorting work across multiple threads
             # - For 8 threads: 4-8x speedup compared to single-threaded sort
-            # - Defensive check: ensure processes > 0 (default is 1, so this should always be true)
-            sort_cmd = f"sort --parallel={max(1, args.processes)}"
+            total_processes = args.processes if args.processes is not None else multiprocessing.cpu_count()
+            sort_cmd = f"sort --parallel={max(1, total_processes)}"
     except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError):
         # OPTIMIZATION: Fall back to standard sort if check fails
         # - If GNU sort not available or version check fails, use standard sort
@@ -1478,9 +1355,6 @@ def main():
     
     print_cpu_guidance(args)
     print_configuration(args)
-    
-    # Print I/O monitoring guidance if chunking is enabled
-    print_io_monitoring_guidance(args)
     
     if not os.path.exists(args.outdir):
         os.makedirs(args.outdir)
