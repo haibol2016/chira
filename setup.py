@@ -61,6 +61,8 @@ setup(
         "download_mirbase_mature.py",
         "extract_transcripts_from_genome.py",
         "remove_mirna_hairpin_from_gtf.py",
+        "process_chunk_batchtools.py",
+        "submit_chunks_batchtools.R",
     ],
     install_requires=[
         # Core Python dependencies (required for basic functionality)
@@ -77,9 +79,6 @@ setup(
                               # Install with: pip install psutil
             "requests",        # For download_ensembl.py (downloading Ensembl files via HTTP/HTTPS)
             "pyliftover",      # For download_mirbase_gff3.py coordinate liftover (converting coordinates between genome versions)
-            "dask-jobqueue",   # For HPC cluster distribution via Dask (chira_map.py --use_dask option)
-                              # Enables distributing chunk processing across cluster nodes
-                              # Install with: pip install dask-jobqueue
         ],
         # Install all optional dependencies: pip install chira[optional]
     },
@@ -130,6 +129,14 @@ setup(
     #   * Used in: extract_transcripts_from_genome.py (optional utility script)
     #   * Part of GFF utilities from Johns Hopkins University
     #   * Install: conda install -c bioconda gffread
+    #
+    # CLUSTER COMPUTING (for parallel processing on HPC clusters):
+    # - R with batchtools package
+    #   * Used in: chira_map.py --use_batchtools (for LSF cluster job submission)
+    #   * Enables distributing chunk processing across cluster nodes via batchtools
+    #   * Install: conda install -c conda-forge r-base r-batchtools
+    #   * Or in R: install.packages("batchtools")
+    #   * Required only if using --use_batchtools option
     #
     # Quick installation of all required tools:
     #   conda install -c bioconda bwa samtools bedtools
