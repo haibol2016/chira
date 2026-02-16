@@ -136,7 +136,9 @@ def extract_reflengths(ref_fasta, d_reflen):
 
 def print_w_time(message):
     # Use f-string for slightly better performance than concatenation
-    print(f"[{datetime.now().strftime('%d-%m-%Y %H:%M:%S')}] {message}")
+    # Print to stderr so logs appear in bsub error files and are visible during execution
+    import sys
+    print(f"[{datetime.now().strftime('%d-%m-%Y %H:%M:%S')}] {message}", file=sys.stderr)
 
 
 def get_bedtools_command(tool_name):

@@ -901,7 +901,7 @@ def setup_dask_cluster(args, num_chunks):
         
         # Create LSF cluster with identifiable job names
         # Generate unique job name based on output directory and timestamp
-        import time
+
         job_name_prefix = f"chira_dask_{os.path.basename(args.outdir)}_{int(time.time())}"
         job_name_prefix = job_name_prefix[:30]  # LSF job names limited to ~30 chars
         
@@ -924,9 +924,13 @@ def setup_dask_cluster(args, num_chunks):
         cluster = LSFCluster(**cluster_kwargs)
         
         # Scale cluster to requested number of workers
+        # This submits LSF worker jobs via bsub. Workers start and wait for tasks.
+        # Workers have access to shared filesystem (chunk files, reference indices)
         cluster.scale(n=num_workers)
         
-        # Create client
+        # Create client to send tasks to workers
+        # Tasks include: chunk FASTA paths, BWA parameters (via alignment_job_types)
+        # Parameters are serialized (pickled) and sent to workers over network
         client = Client(cluster)
         
         print(f"INFO: Dask cluster dashboard available at: {client.dashboard_link}", file=sys.stderr)
@@ -1147,6 +1151,24 @@ def run_bwa_mapping_with_chunking(args, index1, index2):
         """
         Dask-compatible wrapper for process_chunk that takes all arguments explicitly.
         This is needed because Dask requires functions that can be pickled and don't rely on closures.
+        
+        Parameters passed to Dask workers via client.submit():
+        - chunk_file: Path to chunk FASTA file (must be on shared filesystem accessible to workers)
+        - chunk_idx: Chunk index number (integer, serialized)
+        - chunk_dir: Directory containing chunks (shared filesystem path)
+        - alignment_job_types: List of tuples containing all BWA parameters:
+          Each tuple: (align_type, index_type, refindex_path, seed_length, align_score,
+                       match_score, mismatch_score, gap_o, gap_e, n_aligns)
+          - refindex_path: Path to BWA reference index (must be on shared filesystem)
+          - All BWA scoring parameters (seed_length, align_score, match_score, etc.)
+        - per_chunk_processes: Number of CPU processes for BWA alignment (integer)
+        
+        How it works:
+        1. Parameters are serialized (pickled) by Dask client
+        2. Sent over network to Dask workers (running in LSF jobs)
+        3. Workers deserialize and execute process_chunk_with_args()
+        4. Workers access chunk files and reference indices via shared filesystem
+        5. Workers call align_with_bwa() with the provided parameters
         """
         chunk_outdir = os.path.join(chunk_dir, f"chunk_{chunk_idx:03d}_out")
         os.makedirs(chunk_outdir, exist_ok=True)
@@ -1181,47 +1203,85 @@ def run_bwa_mapping_with_chunking(args, index1, index2):
     
     if cluster and client:
         # DASK MODE: Distribute chunks across HPC cluster nodes
+        # Calculate max_parallel once (controls both worker count and parallel chunk limit)
         max_parallel = args.dask_max_parallel if hasattr(args, 'dask_max_parallel') else 2
+        max_parallel = max(1, max_parallel)  # Ensure at least 1
+        
         chira_utilities.print_w_time(f"START: Processing {len(chunk_files)} chunks across HPC cluster using Dask (max {max_parallel} parallel)")
         all_chunk_bams = {}  # Dictionary: job_name -> list of chunk BAM files
         failed_chunks = []
         
         try:
-            # Prepare chunk processing arguments
+            # Prepare chunk processing arguments for Dask workers
+            # Parameters are serialized (pickled) and sent to workers via client.submit()
+            # alignment_job_types contains all BWA parameters extracted from args:
+            #   - seed_length, align_score, match_score, mismatch_score, gap_o, gap_e, n_aligns
+            #   - refindex paths (index1, index2) for BWA reference indices
+            # chunk_file paths point to files on shared filesystem (workers must have access)
             chunk_tasks = []
             for chunk_file in chunk_files:
                 chunk_idx = get_chunk_idx(chunk_file)
-                # Create task arguments - need to pass all required data
+                # Package all parameters needed by process_chunk_with_args()
                 task_args = (
-                    chunk_file, chunk_idx, chunk_dir, alignment_job_types,
-                    per_chunk_processes
+                    chunk_file,           # Path to chunk FASTA (shared filesystem)
+                    chunk_idx,            # Chunk number
+                    chunk_dir,            # Chunk directory (shared filesystem)
+                    alignment_job_types,  # List of BWA parameter tuples (all scoring params)
+                    per_chunk_processes  # CPU processes for BWA
                 )
                 chunk_tasks.append((chunk_idx, chunk_file, task_args))
             
-            # Submit chunks to Dask cluster in batches (controlled by --dask_max_parallel)
-            # This limits how many chunks run simultaneously
-            max_parallel = args.dask_max_parallel if hasattr(args, 'dask_max_parallel') else 2
-            max_parallel = max(1, max_parallel)  # Ensure at least 1
+            # Submit chunk tasks to Dask cluster with controlled parallelism
+            # Dask workers can handle multiple tasks concurrently, but we want to limit
+            # total concurrent chunks to max_parallel for resource management
+            # Strategy: Submit tasks in batches, maintaining max_parallel active tasks
             
             from dask.distributed import as_completed as dask_as_completed
             
-            # Track active futures and pending tasks
-            active_futures = {}  # future -> (chunk_idx, chunk_file)
-            pending_tasks = list(chunk_tasks)  # Queue of tasks not yet submitted
-            futures = {}  # All futures for tracking
+            # Get worker configuration from cluster
+            # Each chunk task uses per_chunk_processes CPUs
+            # Calculate how many tasks each worker can handle concurrently
+            total_processes = args.processes if args.processes is not None else multiprocessing.cpu_count()
+            cores_per_worker = args.dask_cores if args.dask_cores else max(4, total_processes // max(1, args.parallel_chunks))
+            tasks_per_worker = max(1, cores_per_worker // max(1, per_chunk_processes))
             
-            # Submit initial batch up to max_parallel
-            while len(active_futures) < max_parallel and pending_tasks:
+            # Get actual number of workers from cluster
+            num_workers_actual = len(client.scheduler_info()['workers'])
+            max_concurrent_tasks = num_workers_actual * tasks_per_worker
+            
+            # Limit to max_parallel chunks total, regardless of worker capacity
+            max_concurrent_tasks = min(max_concurrent_tasks, max_parallel)
+            
+            print(f"INFO: Submitting chunk tasks to Dask cluster...", file=sys.stderr)
+            print(f"      {num_workers_actual} workers, {cores_per_worker} cores each, {tasks_per_worker} tasks/worker", file=sys.stderr)
+            print(f"      Limiting to {max_concurrent_tasks} concurrent chunks (--dask_max_parallel={max_parallel})", file=sys.stderr)
+            
+            # Submit tasks with controlled parallelism
+            # Submit initial batch up to max_concurrent_tasks
+            pending_tasks = list(chunk_tasks)
+            active_futures = {}
+            futures = {}
+            
+            # Submit initial batch
+            initial_batch = min(max_concurrent_tasks, len(pending_tasks))
+            for _ in range(initial_batch):
                 chunk_idx, chunk_file, task_args = pending_tasks.pop(0)
                 future = client.submit(process_chunk_with_args, *task_args)
                 active_futures[future] = (chunk_idx, chunk_file)
                 futures[future] = (chunk_idx, chunk_file)
             
-            # Process results as they complete and submit new tasks
-            while active_futures:
-                # Wait for at least one future to complete
+            print(f"INFO: Submitted initial batch of {len(active_futures)} tasks", file=sys.stderr)
+            
+            # Process results and submit new tasks as slots become available
+            completed_count = 0
+            while active_futures or pending_tasks:
+                if not active_futures:
+                    break
+                
+                # Wait for tasks to complete
                 for future in dask_as_completed(active_futures):
                     chunk_idx, chunk_file = active_futures.pop(future)
+                    completed_count += 1
                     try:
                         chunk_bams = future.result()
                         # Organize chunk BAMs by job type for later merging
@@ -1229,19 +1289,19 @@ def run_bwa_mapping_with_chunking(args, index1, index2):
                             if job_name not in all_chunk_bams:
                                 all_chunk_bams[job_name] = []
                             all_chunk_bams[job_name].append(bam_file)
-                        print(f"INFO: Chunk {chunk_idx} completed successfully", file=sys.stderr)
+                        print(f"INFO: Chunk {chunk_idx} completed ({completed_count}/{len(chunk_tasks)} total, active: {len(active_futures)}, pending: {len(pending_tasks)})", file=sys.stderr)
                     except Exception as e:
                         failed_chunks.append((chunk_idx, str(e)))
                         print(f"ERROR: Chunk {chunk_idx} failed: {str(e)}", file=sys.stderr)
                     
-                    # Submit next task from queue if available
-                    if pending_tasks and len(active_futures) < max_parallel:
+                    # Submit next task if available and under limit
+                    if pending_tasks and len(active_futures) < max_concurrent_tasks:
                         chunk_idx, chunk_file, task_args = pending_tasks.pop(0)
                         future = client.submit(process_chunk_with_args, *task_args)
                         active_futures[future] = (chunk_idx, chunk_file)
                         futures[future] = (chunk_idx, chunk_file)
                     
-                    break  # Process one at a time to maintain max_parallel limit
+                    break  # Process one completion at a time
         
         finally:
             # Always close cluster and client, even if errors occurred
@@ -1629,8 +1689,22 @@ def main():
     """Main function to orchestrate the mapping workflow."""
     args = parse_arguments()
     
+    # Log file information for bsub jobs
+    # When submitting via bsub, specify output files:
+    #   bsub -o output.log -e error.log chira_map.py [options]
+    # Or use bsub defaults (output goes to: LSF_JOBID.out and LSF_JOBID.err)
+    # All logging goes to stderr, so check the .err file (or error.log if specified)
+    # View logs in real-time: tail -f LSF_JOBID.err
+    
     print_cpu_guidance(args)
     print_configuration(args)
+    
+    # Print log file location if running in bsub environment
+    if 'LSB_JOBID' in os.environ:
+        job_id = os.environ['LSB_JOBID']
+        print(f"INFO: Running under LSF job ID: {job_id}", file=sys.stderr)
+        print(f"      All logging goes to stderr: {job_id}.err (or error.log if specified)", file=sys.stderr)
+        print(f"      View logs in real-time: tail -f {job_id}.err", file=sys.stderr)
     
     if not os.path.exists(args.outdir):
         os.makedirs(args.outdir)
