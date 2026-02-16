@@ -1,0 +1,31 @@
+#!/bin/bash
+## Template file for batchtools LSF job submission
+## This is an example custom template - only needed if built-in "lsf-simple" doesn't work
+##
+## To use this template:
+## 1. Save this file (e.g., as lsf_custom.tmpl)
+## 2. Modify submit_chunks_batchtools.R to use: template = "/path/to/lsf_custom.tmpl"
+##
+## Batchtools will replace these variables:
+## <%= resources %> - Resource requirements (queue, cores, memory, walltime)
+## <%= job.name %> - Job name
+## <%= log.file %> - Log file path
+## <%= rscript %> - R script to execute
+## <%= array %> - Array job specification (if applicable)
+
+#BSUB <%= resources %>
+#BSUB -J <%= job.name %>
+#BSUB -o <%= log.file %>
+#BSUB -e <%= log.file %>
+
+# Example: Load modules if needed
+# module load python/3.9
+# module load bwa
+# module load samtools
+
+# Example: Set environment variables
+# export PATH=/path/to/tools:$PATH
+
+# Execute the R script
+<%= rscript %>
+
