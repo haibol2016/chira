@@ -18,6 +18,17 @@ try:
 except ImportError:
     PSUTIL_AVAILABLE = False
 
+# Optional dependency for HPC cluster distribution via Dask
+# If not available, falls back to ThreadPoolExecutor (single-node parallelization)
+try:
+    from dask_jobqueue import LSFCluster
+    from dask.distributed import Client
+    DASK_AVAILABLE = True
+except ImportError:
+    DASK_AVAILABLE = False
+    LSFCluster = None
+    Client = None
+
 
 def split_fasta_into_chunks(input_fasta, output_dir, num_chunks):
     """
@@ -120,7 +131,7 @@ def align_with_bwa(align_type, index_type, query_fasta, refindex, outdir, seed_l
         n_aligns = "100"
 
     bwa_params = ["-r 1",                       # look for internal seeds inside a seed longer than {-k} * {-r}
-                  "-c 1000",
+                  "-c 1000",                    # maximum number of occurrences of a seed
                   "-A "+ str(macth_score),          # match score
                   "-B " + str(mistmatch_score),       # mismatch penalty
                   "-O " + str(gap_o),                # gap open penalty
@@ -655,6 +666,42 @@ HOW TO SET --parallel_chunks:
 
 Note: This parameter only takes effect when --chunk_fasta is specified.''')
 
+    parser.add_argument('--use_dask', action='store_true', dest='use_dask',
+                        help='''Use Dask-Jobqueue to distribute chunk processing across HPC cluster nodes.
+                                Requires dask-jobqueue package. Falls back to ThreadPoolExecutor if not available.
+                                Only effective when --chunk_fasta is specified.''')
+
+    parser.add_argument('--dask_queue', action='store', type=str, default='long', metavar='',
+                        dest='dask_queue',
+                        help='LSF queue name for Dask workers (default: long)')
+
+    parser.add_argument('--dask_cores', action='store', type=int, default=None, metavar='',
+                        dest='dask_cores',
+                        help='''Number of cores per Dask worker job (default: auto-calculated from --processes).
+                                Should match your LSF job script -n parameter.''')
+
+    parser.add_argument('--dask_memory', action='store', type=str, default=None, metavar='',
+                        dest='dask_memory',
+                        help='''Memory per Dask worker job, e.g., "8GB" (default: auto-calculated).
+                                Should match your LSF job script -R rusage[mem=...] parameter.''')
+
+    parser.add_argument('--dask_walltime', action='store', type=str, default='240:00', metavar='',
+                        dest='dask_walltime',
+                        help='Walltime limit for Dask worker jobs, e.g., "240:00" (default: 240:00).')
+
+    parser.add_argument('--dask_workers', action='store', type=int, default=None, metavar='',
+                        dest='dask_workers',
+                        help='''Number of Dask worker jobs to submit (default: number of chunks).
+                                Each worker processes one chunk. Set lower to limit cluster resource usage.''')
+
+    parser.add_argument('--dask_conda_env', action='store', type=str, default=None, metavar='',
+                        dest='dask_conda_env',
+                        help='''Conda environment name or path to activate in Dask worker jobs.
+                                If not specified, auto-detects from CONDA_DEFAULT_ENV environment variable.
+                                Required for ensuring ChiRA dependencies (BWA, samtools, Python packages) are available on worker nodes.
+                                Example: --dask_conda_env chira_env
+                                Example: --dask_conda_env /path/to/miniconda3/envs/chira_env''')
+
     parser.add_argument('-v', '--version', action='version', version='%(prog)s 1.4.4')
 
     args = parser.parse_args()
@@ -787,6 +834,147 @@ def run_clan_mapping(args, index1, index2):
     chira_utilities.print_w_time("START: Write alignments to BED")
     clan_to_bed(args.outdir)
     chira_utilities.print_w_time("END: Write alignments to BED")
+
+
+def setup_dask_cluster(args, num_chunks):
+    """
+    Set up Dask cluster with LSF job scheduler for HPC cluster distribution.
+    
+    Args:
+        args: Command-line arguments
+        num_chunks: Number of chunks to process (determines number of workers)
+    
+    Returns:
+        tuple: (cluster, client) or (None, None) if Dask not available or not requested
+    """
+    if not args.use_dask:
+        return None, None
+    
+    if not DASK_AVAILABLE:
+        print("WARNING: --use_dask specified but dask-jobqueue not available.", file=sys.stderr)
+        print("         Install with: pip install dask-jobqueue", file=sys.stderr)
+        print("         Falling back to ThreadPoolExecutor (single-node parallelization)", file=sys.stderr)
+        return None, None
+    
+    try:
+        # Calculate resources per worker based on user settings or defaults
+        total_processes = args.processes if args.processes is not None else multiprocessing.cpu_count()
+        
+        # Cores per worker: use user setting or calculate from processes
+        if args.dask_cores:
+            cores_per_worker = args.dask_cores
+        else:
+            # Default: use processes per chunk calculation
+            # For chunking, divide processes among parallel chunks
+            cores_per_worker = max(4, total_processes // max(1, args.parallel_chunks))
+        
+        # Memory per worker: use user setting or calculate
+        if args.dask_memory:
+            memory_per_worker = args.dask_memory
+        else:
+            # Estimate memory based on BWA requirements
+            # BWA typically needs 2-4GB per job, add buffer
+            estimated_memory_gb = max(4, cores_per_worker * 0.5)  # ~0.5GB per core
+            memory_per_worker = f"{int(estimated_memory_gb)}GB"
+        
+        # Number of workers: use user setting or one per chunk
+        if args.dask_workers:
+            num_workers = min(args.dask_workers, num_chunks)
+        else:
+            num_workers = num_chunks  # One worker per chunk
+        
+        # Determine conda environment to use
+        conda_env = args.dask_conda_env
+        if not conda_env:
+            # Auto-detect from environment variable
+            conda_env = os.environ.get('CONDA_DEFAULT_ENV')
+            if conda_env:
+                print(f"INFO: Auto-detected conda environment: {conda_env}", file=sys.stderr)
+            else:
+                print("WARNING: No conda environment specified and CONDA_DEFAULT_ENV not set.", file=sys.stderr)
+                print("         Dask workers may not have access to ChiRA dependencies.", file=sys.stderr)
+                print("         Specify --dask_conda_env or ensure CONDA_DEFAULT_ENV is set.", file=sys.stderr)
+        
+        # Build conda activation commands for job script
+        job_script_prologue = []
+        if conda_env:
+            # Initialize conda (common locations)
+            conda_init_commands = [
+                'eval "$(conda shell.bash hook)" 2>/dev/null || true',
+                'source "$(conda info --base)/etc/profile.d/conda.sh" 2>/dev/null || true',
+            ]
+            job_script_prologue.extend(conda_init_commands)
+            
+            # Activate conda environment
+            if os.path.isabs(conda_env):
+                # Full path provided
+                conda_activate = f'conda activate {conda_env}'
+            else:
+                # Environment name provided
+                conda_activate = f'conda activate {conda_env}'
+            job_script_prologue.append(conda_activate)
+            
+            print(f"INFO: Conda environment '{conda_env}' will be activated in worker jobs", file=sys.stderr)
+        
+        print(f"INFO: Setting up Dask cluster with LSF scheduler:", file=sys.stderr)
+        print(f"      Queue: {args.dask_queue}", file=sys.stderr)
+        print(f"      Workers: {num_workers} (one per chunk)", file=sys.stderr)
+        print(f"      Cores per worker: {cores_per_worker}", file=sys.stderr)
+        print(f"      Memory per worker: {memory_per_worker}", file=sys.stderr)
+        print(f"      Walltime: {args.dask_walltime}", file=sys.stderr)
+        if conda_env:
+            print(f"      Conda environment: {conda_env}", file=sys.stderr)
+        
+        # Create LSF cluster
+        cluster_kwargs = {
+            'queue': args.dask_queue,
+            'cores': cores_per_worker,
+            'memory': memory_per_worker,
+            'walltime': args.dask_walltime,
+            'job_extra_directives': [
+                f'#BSUB -R "span[hosts=1]"',  # All processes on same host
+            ],
+            'log_directory': os.path.join(args.outdir, "dask_logs"),
+        }
+        
+        # Add conda activation to job script if specified
+        if job_script_prologue:
+            cluster_kwargs['job_script_prologue'] = job_script_prologue
+        
+        cluster = LSFCluster(**cluster_kwargs)
+        
+        # Scale cluster to requested number of workers
+        cluster.scale(n=num_workers)
+        
+        # Create client
+        client = Client(cluster)
+        
+        print(f"INFO: Dask cluster dashboard available at: {client.dashboard_link}", file=sys.stderr)
+        print(f"      Waiting for {num_workers} workers to start...", file=sys.stderr)
+        
+        # Wait for workers to be ready (with timeout)
+        max_wait_time = 300  # 5 minutes max wait
+        wait_interval = 5
+        elapsed = 0
+        while len(client.scheduler_info()['workers']) < num_workers and elapsed < max_wait_time:
+            time.sleep(wait_interval)
+            elapsed += wait_interval
+            ready_workers = len(client.scheduler_info()['workers'])
+            print(f"      {ready_workers}/{num_workers} workers ready...", file=sys.stderr)
+        
+        ready_workers = len(client.scheduler_info()['workers'])
+        if ready_workers < num_workers:
+            print(f"WARNING: Only {ready_workers}/{num_workers} workers started within timeout.", file=sys.stderr)
+            print(f"         Proceeding with {ready_workers} workers.", file=sys.stderr)
+        else:
+            print(f"INFO: All {ready_workers} workers ready!", file=sys.stderr)
+        
+        return cluster, client
+    
+    except Exception as e:
+        print(f"ERROR: Failed to set up Dask cluster: {str(e)}", file=sys.stderr)
+        print("       Falling back to ThreadPoolExecutor (single-node parallelization)", file=sys.stderr)
+        return None, None
 
 
 def get_alignment_job_types(args, index1, index2):
@@ -940,7 +1128,7 @@ def run_bwa_mapping_with_chunking(args, index1, index2):
         Process a single chunk through all alignment jobs.
         
         Execution: Alignment job types run SEQUENTIALLY within each chunk.
-        Multiple chunks can run in PARALLEL (controlled by ThreadPoolExecutor).
+        Multiple chunks can run in PARALLEL (controlled by ThreadPoolExecutor or Dask).
         
         Example for chunk_000:
           1. Run index1.long alignment on chunk_000.fasta → chunk_000_out/index1.long.bam
@@ -971,9 +1159,39 @@ def run_bwa_mapping_with_chunking(args, index1, index2):
         
         return chunk_bams
     
-    # EXECUTION MODEL: Process chunks in PARALLEL using ThreadPoolExecutor
+    def process_chunk_with_args(chunk_file, chunk_idx, chunk_dir, alignment_job_types,
+                                per_chunk_processes):
+        """
+        Dask-compatible wrapper for process_chunk that takes all arguments explicitly.
+        This is needed because Dask requires functions that can be pickled and don't rely on closures.
+        """
+        chunk_outdir = os.path.join(chunk_dir, f"chunk_{chunk_idx:03d}_out")
+        os.makedirs(chunk_outdir, exist_ok=True)
+        
+        chunk_bams = {}
+        for (align_type, index_type, refindex, seed_length, align_score,
+             match_score, mismatch_score, gap_o, gap_e, n_aligns) in alignment_job_types:
+            job_name = f"{index_type}.{align_type}"
+            try:
+                align_with_bwa(align_type, index_type, chunk_file, refindex, chunk_outdir,
+                              seed_length, align_score, match_score, mismatch_score,
+                              gap_o, gap_e, n_aligns, per_chunk_processes)
+                chunk_bam = os.path.join(chunk_outdir, index_type + "." + align_type + ".bam")
+                chunk_bams[job_name] = chunk_bam
+            except Exception as e:
+                raise RuntimeError(f"Chunk {chunk_idx} {job_name} failed: {str(e)}")
+        
+        return chunk_bams
+    
+    # EXECUTION MODEL: Process chunks in PARALLEL using Dask (HPC cluster) or ThreadPoolExecutor (single node)
     # 
-    # Parallelism Level:
+    # Dask Mode (--use_dask):
+    # - Each chunk is submitted as a separate LSF job to cluster nodes
+    # - All chunks can run simultaneously across different cluster nodes
+    # - No limit on parallel chunks (limited only by cluster resources)
+    # - Each worker node processes one chunk independently
+    #
+    # ThreadPoolExecutor Mode (default):
     # - Number of parallel chunks is controlled by --parallel_chunks (default: 2)
     # - Each BWA job needs 4-8 CPUs, so N chunks = N active BWA jobs at a time
     # - Example: 32 processes, 10 chunks, --parallel_chunks 2 → 2 chunks in parallel (16 processes each)
@@ -984,65 +1202,96 @@ def run_bwa_mapping_with_chunking(args, index1, index2):
     # - All alignment job types run one after another
     # - Example: chunk_000 runs index1.long → index1.short → index2.long → index2.short
     # - Each job uses all processes allocated to the chunk (per_chunk_processes)
-    #
-    # Across Chunks (PARALLEL, controlled by --parallel_chunks):
-    # - Number of chunks running simultaneously is controlled by --parallel_chunks (default: 2)
-    # - Example: With 32 processes and --parallel_chunks 2, 2 chunks run in parallel (16 processes each)
-    # - Example: With 32 processes and --parallel_chunks 4, 4 chunks run in parallel (8 processes each)
-    # - Each chunk processes 4 jobs sequentially, so N active BWA jobs at any time (where N = --parallel_chunks)
-    #
-    # Performance Impact:
-    # - Sequential within chunk: 10 chunks × 4 jobs × 30 min = 20 hours total
-    # - Parallel chunks (N at a time): 10 chunks processed in batches of N = ~(10/N) × 30 min total
-    # - Speedup: ~Nx for this example (limited by --parallel_chunks to prevent resource exhaustion)
-    chira_utilities.print_w_time(f"START: Processing {len(chunk_files)} chunks in parallel (up to {num_parallel_chunks} simultaneously)")
-    all_chunk_bams = {}  # Dictionary: job_name -> list of chunk BAM files
-    
-    def process_chunk_wrapper(chunk_info):
-        """Wrapper function to process a chunk (used by ThreadPoolExecutor)."""
-        chunk_file, chunk_idx = chunk_info
-        return process_chunk(chunk_file, chunk_idx)
-    
-    failed_chunks = []
-    # EXECUTION: Submit all chunk processing tasks to ThreadPoolExecutor
-    # - Each chunk will be processed through all alignment job types
-    # - Multiple chunks run in parallel (controlled by max_workers)
-    # - Results are collected as they complete (as_completed)
     
     # Extract chunk index from filename (e.g., "chunk_005.fasta" -> 5)
-    # This ensures chunk_idx matches the actual chunk file index, not enumerate position
     def get_chunk_idx(chunk_file):
         basename = os.path.basename(chunk_file)
-        # Extract number from "chunk_XXX.fasta" format
         return int(basename.replace("chunk_", "").replace(".fasta", ""))
     
-    with ThreadPoolExecutor(max_workers=num_parallel_chunks) as executor:
-        # Submit all chunk processing tasks to the executor
-        # Each task will process one chunk through all alignment job types
-        future_to_chunk = {executor.submit(process_chunk_wrapper, (chunk_file, get_chunk_idx(chunk_file))): 
-                          (get_chunk_idx(chunk_file), chunk_file) for chunk_file in chunk_files}
+    # Set up Dask cluster if requested
+    cluster, client = setup_dask_cluster(args, len(chunk_files))
+    
+    if cluster and client:
+        # DASK MODE: Distribute chunks across HPC cluster nodes
+        chira_utilities.print_w_time(f"START: Processing {len(chunk_files)} chunks across HPC cluster using Dask")
+        all_chunk_bams = {}  # Dictionary: job_name -> list of chunk BAM files
+        failed_chunks = []
         
-        # EXECUTION: Collect results as chunks complete processing
-        # Results are organized by job type: all chunk BAMs for each job type are grouped together
-        # Example structure after collection:
-        #   all_chunk_bams = {
-        #     "index1.long":  [chunk_000/index1.long.bam, chunk_001/index1.long.bam, ...],
-        #     "index1.short": [chunk_000/index1.short.bam, chunk_001/index1.short.bam, ...],
-        #     "index2.long":  [chunk_000/index2.long.bam, chunk_001/index2.long.bam, ...],
-        #     "index2.short": [chunk_000/index2.short.bam, chunk_001/index2.short.bam, ...]
-        #   }
-        for future in as_completed(future_to_chunk):
-            chunk_idx, chunk_file = future_to_chunk[future]
+        try:
+            # Prepare chunk processing arguments
+            chunk_tasks = []
+            for chunk_file in chunk_files:
+                chunk_idx = get_chunk_idx(chunk_file)
+                # Create task arguments - need to pass all required data
+                task_args = (
+                    chunk_file, chunk_idx, chunk_dir, alignment_job_types,
+                    per_chunk_processes
+                )
+                chunk_tasks.append((chunk_idx, chunk_file, task_args))
+            
+            # Submit all chunks to Dask cluster
+            futures = {}
+            for chunk_idx, chunk_file, task_args in chunk_tasks:
+                future = client.submit(process_chunk_with_args, *task_args)
+                futures[future] = (chunk_idx, chunk_file)
+            
+            # Collect results as they complete
+            # Use Dask's as_completed for proper async result collection
+            from dask.distributed import as_completed as dask_as_completed
+            
+            for future in dask_as_completed(futures):
+                chunk_idx, chunk_file = futures[future]
+                try:
+                    chunk_bams = future.result()
+                    # Organize chunk BAMs by job type for later merging
+                    for job_name, bam_file in chunk_bams.items():
+                        if job_name not in all_chunk_bams:
+                            all_chunk_bams[job_name] = []
+                        all_chunk_bams[job_name].append(bam_file)
+                    print(f"INFO: Chunk {chunk_idx} completed successfully", file=sys.stderr)
+                except Exception as e:
+                    failed_chunks.append((chunk_idx, str(e)))
+                    print(f"ERROR: Chunk {chunk_idx} failed: {str(e)}", file=sys.stderr)
+        
+        finally:
+            # Always close cluster and client, even if errors occurred
             try:
-                # Get results from this chunk (dictionary: job_name -> chunk BAM path)
-                chunk_bams = future.result()
-                # Organize chunk BAMs by job type for later merging
-                for job_name, bam_file in chunk_bams.items():
-                    if job_name not in all_chunk_bams:
-                        all_chunk_bams[job_name] = []
-                    all_chunk_bams[job_name].append(bam_file)
+                client.close()
+                cluster.close()
+                print(f"INFO: Dask cluster closed", file=sys.stderr)
             except Exception as e:
-                failed_chunks.append((chunk_idx, str(e)))
+                print(f"WARNING: Error closing Dask cluster: {str(e)}", file=sys.stderr)
+        
+        chira_utilities.print_w_time(f"END: All chunks processed via Dask cluster")
+    
+    else:
+        # THREADPOOLEXECUTOR MODE: Process chunks on single node
+        chira_utilities.print_w_time(f"START: Processing {len(chunk_files)} chunks in parallel (up to {num_parallel_chunks} simultaneously)")
+        all_chunk_bams = {}  # Dictionary: job_name -> list of chunk BAM files
+        failed_chunks = []
+        
+        def process_chunk_wrapper(chunk_info):
+            """Wrapper function to process a chunk (used by ThreadPoolExecutor)."""
+            chunk_file, chunk_idx = chunk_info
+            return process_chunk(chunk_file, chunk_idx)
+        
+        with ThreadPoolExecutor(max_workers=num_parallel_chunks) as executor:
+            # Submit all chunk processing tasks to the executor
+            future_to_chunk = {executor.submit(process_chunk_wrapper, (chunk_file, get_chunk_idx(chunk_file))): 
+                              (get_chunk_idx(chunk_file), chunk_file) for chunk_file in chunk_files}
+            
+            # Collect results as chunks complete processing
+            for future in as_completed(future_to_chunk):
+                chunk_idx, chunk_file = future_to_chunk[future]
+                try:
+                    chunk_bams = future.result()
+                    # Organize chunk BAMs by job type for later merging
+                    for job_name, bam_file in chunk_bams.items():
+                        if job_name not in all_chunk_bams:
+                            all_chunk_bams[job_name] = []
+                        all_chunk_bams[job_name].append(bam_file)
+                except Exception as e:
+                    failed_chunks.append((chunk_idx, str(e)))
     
     chira_utilities.print_w_time(f"END: All chunks processed")
     
@@ -1070,17 +1319,54 @@ def run_bwa_mapping_with_chunking(args, index1, index2):
     # - pysam.merge uses samtools merge with -@ for multi-threaded compression
     chira_utilities.print_w_time("START: Merging chunk BAM files by job type")
     final_bams = {}  # Dictionary: job_name -> final merged BAM file path
+    total_processes = args.processes if args.processes is not None else multiprocessing.cpu_count()
+    
+    # MEMORY OPTIMIZATION: For very large numbers of chunks (>50), merge in batches
+    # This prevents passing too many file paths to pysam.merge at once
+    # Batch size of 50 is a good balance between memory usage and merge efficiency
+    MAX_CHUNKS_PER_MERGE = 50
+    
     for job_name, chunk_bam_list in all_chunk_bams.items():
         final_bam = os.path.join(args.outdir, f"{job_name}.bam")
         if len(chunk_bam_list) == 1:
             # Edge case: Only one chunk, just move/rename (no merge needed)
             shutil.move(chunk_bam_list[0], final_bam)
-        else:
+        elif len(chunk_bam_list) <= MAX_CHUNKS_PER_MERGE:
             # Merge all chunk BAMs for this job type into a single final BAM
             # -@ processes enables multi-threaded compression during merge
             # For 10 chunks: 8 threads = 5-10x speedup vs single-threaded
             total_processes = args.processes if args.processes is not None else multiprocessing.cpu_count()
             pysam.merge("-f", "-@", str(max(1, total_processes)), final_bam, *chunk_bam_list)
+        else:
+            # MEMORY OPTIMIZATION: Merge in batches for very large numbers of chunks
+            # This reduces memory usage when merging 50+ chunk BAMs
+            temp_bams = []
+            for batch_start in range(0, len(chunk_bam_list), MAX_CHUNKS_PER_MERGE):
+                batch_end = min(batch_start + MAX_CHUNKS_PER_MERGE, len(chunk_bam_list))
+                batch_chunks = chunk_bam_list[batch_start:batch_end]
+                
+                if len(batch_chunks) == 1:
+                    temp_bams.append(batch_chunks[0])
+                else:
+                    # Merge this batch into a temporary BAM
+                    temp_bam = os.path.join(args.outdir, f"{job_name}.temp_batch_{batch_start}.bam")
+                    pysam.merge("-f", "-@", str(max(1, total_processes)), temp_bam, *batch_chunks)
+                    temp_bams.append(temp_bam)
+            
+            # Merge all batch BAMs into final BAM
+            if len(temp_bams) == 1:
+                shutil.move(temp_bams[0], final_bam)
+            else:
+                pysam.merge("-f", "-@", str(max(1, total_processes)), final_bam, *temp_bams)
+            
+            # Clean up temporary batch BAMs
+            for temp_bam in temp_bams:
+                if temp_bam != final_bam and os.path.exists(temp_bam):
+                    try:
+                        os.remove(temp_bam)
+                    except OSError:
+                        pass
+        
         final_bams[job_name] = final_bam
     chira_utilities.print_w_time("END: Merged chunk BAM files")
     
