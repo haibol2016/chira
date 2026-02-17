@@ -140,6 +140,64 @@ conda activate chira
 pip install -e .
 ```
 
+## Using ChiRA in LSF Job Scripts
+
+After installing ChiRA with `pip install -e .`, the scripts are available as commands in your conda environment.
+
+### Example bsub Job Script
+
+```bash
+#!/bin/bash
+#BSUB -n 8
+#BSUB -R rusage[mem=16000]
+#BSUB -W 240:00
+#BSUB -J "chira_map[5]"
+#BSUB -q long
+#BSUB -o logs/out.%J.%I.txt
+#BSUB -e logs/err.%J.%I.txt
+
+# Activate conda environment
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate chira
+
+# Load modules (if available)
+module load samtools
+module load bwa
+
+# Use chira_map.py directly (available after pip install)
+chira_map.py --aligner bwa \
+   -i input.fasta \
+   -o output_dir \
+   --chunk_fasta 10 \
+   --use_batchtools \
+   --batchtools_queue long \
+   --batchtools_cores 8 \
+   --batchtools_memory 8GB \
+   --index1 index1.fa \
+   --index2 index2.fa \
+   -s fw -p 8 -co 2
+```
+
+### Important Notes for Batchtools
+
+1. **R and batchtools must be available**: The conda environment needs R and batchtools:
+   ```bash
+   conda activate chira
+   conda install -c conda-forge r-base r-batchtools
+   ```
+
+2. **Conda environment path**: Use `--batchtools_conda_env` to specify the full path:
+   ```bash
+   --batchtools_conda_env ~/miniconda3/envs/chira
+   ```
+
+3. **Scripts location**: After `pip install -e .`, scripts are in your PATH:
+   - `chira_map.py` - Direct command (recommended)
+   - `python -m chira_map` - Alternative method
+   - Full path not needed if installed
+
+See `EXAMPLE_bsub_JOB.sh` for a complete working example.
+
 ## Uninstalling
 
 ```bash

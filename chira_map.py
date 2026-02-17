@@ -1233,22 +1233,41 @@ def run_bwa_mapping_with_chunking(args, index1, index2):
     print(f"INFO: Total alignment jobs = {len(chunk_files)} chunks × {num_job_types} job types = {len(chunk_files) * num_job_types} jobs", file=sys.stderr)
     
     # Calculate parallel chunks and processes per chunk
-    total_processes = args.processes if args.processes is not None else multiprocessing.cpu_count()
-    num_parallel_chunks = min(args.parallel_chunks, len(chunk_files))
-    per_chunk_processes = calculate_per_job_processes(total_processes, num_parallel_chunks)
+    # IMPORTANT: In batchtools mode, per_chunk_processes should match --batchtools_cores
+    # In single-node mode, it's calculated from --processes and --parallel_chunks
+    use_batchtools = args.use_batchtools if hasattr(args, 'use_batchtools') else False
     
-    # Ensure each chunk gets at least 4 processes (minimum for BWA)
-    if per_chunk_processes < 4:
-        required_processes = args.parallel_chunks * 4
-        num_parallel_chunks = max(1, total_processes // 4)
+    if use_batchtools:
+        # BATCHTOOLS MODE: per_chunk_processes should match the cores requested for each LSF job
+        # This ensures BWA uses all available cores on the cluster node
+        if args.batchtools_cores:
+            per_chunk_processes = args.batchtools_cores
+        else:
+            # Default to 8 if not specified (matches default in submit_chunks_with_batchtools)
+            per_chunk_processes = 8
+            print(f"INFO: Using default {per_chunk_processes} processes per chunk (matches --batchtools_cores default)", file=sys.stderr)
+        print(f"INFO: Batchtools mode: Each LSF job will use {per_chunk_processes} processes for BWA alignment", file=sys.stderr)
+        print(f"INFO: Within each chunk, {num_job_types} alignment jobs will run sequentially (each job uses {per_chunk_processes} processes)", file=sys.stderr)
+        # num_parallel_chunks not used in batchtools mode, but set for consistency
+        num_parallel_chunks = len(chunk_files)
+    else:
+        # SINGLE-NODE MODE: Calculate from --processes and --parallel_chunks
+        total_processes = args.processes if args.processes is not None else multiprocessing.cpu_count()
+        num_parallel_chunks = min(args.parallel_chunks, len(chunk_files))
         per_chunk_processes = calculate_per_job_processes(total_processes, num_parallel_chunks)
-        print(f"WARNING: Not enough processes for {args.parallel_chunks} chunks (need at least {required_processes}, have {total_processes}).", file=sys.stderr)
-        print(f"         Running {num_parallel_chunks} chunks in parallel instead ({per_chunk_processes} processes each).", file=sys.stderr)
-    
-    print(f"INFO: Using {total_processes} total processes across {num_parallel_chunks} parallel chunks → {per_chunk_processes} processes per chunk", file=sys.stderr)
-    print(f"INFO: Within each chunk, {num_job_types} alignment jobs will run sequentially (each job uses {per_chunk_processes} processes)", file=sys.stderr)
-    if num_parallel_chunks < len(chunk_files):
-        print(f"INFO: Processing {len(chunk_files)} total chunks in batches of {num_parallel_chunks} (limited to prevent resource exhaustion)", file=sys.stderr)
+        
+        # Ensure each chunk gets at least 4 processes (minimum for BWA)
+        if per_chunk_processes < 4:
+            required_processes = args.parallel_chunks * 4
+            num_parallel_chunks = max(1, total_processes // 4)
+            per_chunk_processes = calculate_per_job_processes(total_processes, num_parallel_chunks)
+            print(f"WARNING: Not enough processes for {args.parallel_chunks} chunks (need at least {required_processes}, have {total_processes}).", file=sys.stderr)
+            print(f"         Running {num_parallel_chunks} chunks in parallel instead ({per_chunk_processes} processes each).", file=sys.stderr)
+        
+        print(f"INFO: Single-node mode: Using {total_processes} total processes across {num_parallel_chunks} parallel chunks → {per_chunk_processes} processes per chunk", file=sys.stderr)
+        print(f"INFO: Within each chunk, {num_job_types} alignment jobs will run sequentially (each job uses {per_chunk_processes} processes)", file=sys.stderr)
+        if num_parallel_chunks < len(chunk_files):
+            print(f"INFO: Processing {len(chunk_files)} total chunks in batches of {num_parallel_chunks} (limited to prevent resource exhaustion)", file=sys.stderr)
     
     def process_chunk(chunk_file, chunk_idx):
         """
