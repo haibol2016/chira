@@ -69,12 +69,33 @@ template_file <- if (is.null(config$template_file) || config$template_file == ""
 # Configure LSF cluster functions (following InPAS pattern with latency settings)
 # InPAS uses: makeClusterFunctionsLSF(template = template_file, scheduler.latency = 1, fs.latency = 65)
 if (template_file == "lsf-simple" || file.exists(template_file)) {
+  cat(sprintf("Configuring LSF cluster functions with template: %s\n", template_file))
   reg$cluster.functions <- makeClusterFunctionsLSF(
     template = template_file,
     scheduler.latency = 1,  # Latency for scheduler operations (seconds) - from InPAS
     fs.latency = 65         # Latency for filesystem operations (seconds) - from InPAS
   )
-  cat(sprintf("Using LSF template: %s\n", template_file))
+  cat(sprintf("LSF cluster functions configured successfully.\n"))
+  
+  # Verify cluster functions are set correctly
+  if (is.null(reg$cluster.functions)) {
+    stop("ERROR: Cluster functions are NULL after configuration!")
+  }
+  cat(sprintf("Cluster functions type: %s\n", class(reg$cluster.functions)[1]))
+  
+  # Test LSF connectivity
+  cat("Testing LSF connectivity...\n")
+  test_result <- tryCatch({
+    system("bqueues > /dev/null 2>&1", intern = FALSE)
+  }, error = function(e) {
+    return(1)
+  })
+  if (test_result != 0) {
+    cat("WARNING: Cannot execute 'bqueues'. LSF may not be available or not in PATH.\n")
+    cat("  This may prevent jobs from being submitted to LSF.\n")
+  } else {
+    cat("LSF connectivity test passed.\n")
+  }
 } else {
   stop(sprintf("Template file '%s' does not exist. Use --batchtools_template to specify a valid template file.", template_file))
 }
@@ -165,8 +186,36 @@ if (max_parallel < length(ids)) {
     
     cat(sprintf("Submitting batch %d/%d: %d jobs (max %d concurrent)...\n", 
                 batch_idx, num_batches, length(batch_ids), max_parallel))
-    submitJobs(batch_ids, resources = resources, reg = reg)
-    all_submitted_ids <- c(all_submitted_ids, batch_ids)
+    
+    # Submit jobs and check for errors
+    tryCatch({
+      submitJobs(batch_ids, resources = resources, reg = reg)
+      
+      # Verify jobs were actually submitted by checking status
+      Sys.sleep(2)  # Give LSF a moment to register jobs
+      job_table <- getJobTable(ids = batch_ids, reg = reg)
+      
+      # Check if jobs have batch.id (LSF job IDs) - this confirms they were submitted
+      submitted_count <- sum(!is.na(job_table$batch.id))
+      cat(sprintf("  Verified: %d/%d jobs have LSF batch IDs\n", submitted_count, length(batch_ids)))
+      
+      if (submitted_count == 0) {
+        cat("  WARNING: No jobs have LSF batch IDs! Jobs may not have been submitted to LSF.\n")
+        cat("  Check batchtools logs in:", reg_dir, "\n")
+        cat("  Try: bjobs -u $USER\n")
+      } else {
+        # Print LSF job IDs for verification
+        lsf_job_ids <- job_table$batch.id[!is.na(job_table$batch.id)]
+        cat(sprintf("  LSF job IDs: %s\n", paste(lsf_job_ids, collapse=", ")))
+        cat(sprintf("  Verify with: bjobs %s\n", paste(lsf_job_ids, collapse=" ")))
+      }
+      
+      all_submitted_ids <- c(all_submitted_ids, batch_ids)
+    }, error = function(e) {
+      cat(sprintf("  ERROR submitting batch %d: %s\n", batch_idx, as.character(e)))
+      cat("  Check batchtools configuration and LSF template.\n")
+      stop(e)
+    })
     
     # Wait for this batch to complete before submitting next batch (if any remain)
     # Following InPAS pattern: use waitForJobs() for proper batchtools integration
@@ -201,20 +250,67 @@ if (max_parallel < length(ids)) {
 } else {
   # Submit all jobs at once (no limit)
   cat(sprintf("Submitting all %d jobs at once (no max_parallel limit)...\n", length(ids)))
-  submitJobs(ids, resources = resources, reg = reg)
-  submitted_ids <- ids
+  
+  # Submit jobs and check for errors
+  tryCatch({
+    submitJobs(ids, resources = resources, reg = reg)
+    
+    # Verify jobs were actually submitted by checking status
+    Sys.sleep(2)  # Give LSF a moment to register jobs
+    job_table <- getJobTable(ids = ids, reg = reg)
+    
+    # Check if jobs have batch.id (LSF job IDs) - this confirms they were submitted
+    submitted_count <- sum(!is.na(job_table$batch.id))
+    cat(sprintf("Verified: %d/%d jobs have LSF batch IDs\n", submitted_count, length(ids)))
+    
+    if (submitted_count == 0) {
+      cat("WARNING: No jobs have LSF batch IDs! Jobs may not have been submitted to LSF.\n")
+      cat("Check batchtools logs in:", reg_dir, "\n")
+      cat("Try: bjobs -u $USER\n")
+      cat("Check template file:", template_file, "\n")
+    } else {
+      # Print first few LSF job IDs for verification
+      lsf_job_ids <- job_table$batch.id[!is.na(job_table$batch.id)]
+      cat(sprintf("LSF job IDs (first 5): %s\n", paste(head(lsf_job_ids, 5), collapse=", ")))
+      cat(sprintf("Verify with: bjobs %s\n", paste(head(lsf_job_ids, 5), collapse=" ")))
+    }
+    
+    submitted_ids <- ids
+  }, error = function(e) {
+    cat(sprintf("ERROR submitting jobs: %s\n", as.character(e)))
+    cat("Check batchtools configuration and LSF template.\n")
+    stop(e)
+  })
 }
 
-cat(sprintf("\nSubmitted %d jobs total. Job IDs: %s\n", length(submitted_ids), paste(submitted_ids, collapse = ", ")))
+# Get final status and LSF job IDs
+final_job_table <- getJobTable(ids = submitted_ids, reg = reg)
+lsf_job_ids <- final_job_table$batch.id[!is.na(final_job_table$batch.id)]
+
+cat(sprintf("\n=== Submission Summary ===\n"))
+cat(sprintf("Batchtools job IDs: %s\n", paste(submitted_ids, collapse = ", ")))
+cat(sprintf("LSF job IDs: %s\n", ifelse(length(lsf_job_ids) > 0, paste(lsf_job_ids, collapse = ", "), "NONE (jobs not submitted to LSF!)")))
 cat(sprintf("Registry directory: %s\n", reg_dir))
-cat(sprintf("Monitor jobs with: bjobs -J %s*\n", job_name_prefix))
-cat(sprintf("Check all your jobs: bjobs -u $USER\n"))
+cat(sprintf("\n=== Verification Commands ===\n"))
+if (length(lsf_job_ids) > 0) {
+  cat(sprintf("Check LSF jobs: bjobs %s\n", paste(head(lsf_job_ids, 10), collapse=" ")))
+  cat(sprintf("Check all your jobs: bjobs -u $USER\n"))
+  cat(sprintf("Monitor jobs by name: bjobs -J %s*\n", job_name_prefix))
+} else {
+  cat("WARNING: No LSF job IDs found! Jobs were not submitted to LSF.\n")
+  cat("Troubleshooting steps:\n")
+  cat("  1. Check batchtools logs in:", reg_dir, "\n")
+  cat("  2. Verify LSF template:", template_file, "\n")
+  cat("  3. Check if batchtools can access LSF: bqueues\n")
+  cat("  4. Check registry status: loadRegistry('", reg_dir, "'); getStatus(reg)\n", sep="")
+}
 cat(sprintf("Check queue limits: bqueues -l %s\n", queue))
 cat(sprintf("Check status in R: loadRegistry('%s'); getStatus(reg)\n", reg_dir))
-cat(sprintf("\nNOTE: If only a few jobs are running, check:\n"))
+cat(sprintf("\nNOTE: If jobs are not visible in bjobs, check:\n"))
 cat(sprintf("  1. LSF queue limits: bqueues -l %s (look for 'MAX' or 'JOB_LIMIT')\n", queue))
 cat(sprintf("  2. Your job limits: bqueues -l %s | grep -i limit\n", queue))
 cat(sprintf("  3. All your jobs: bjobs -u $USER (some may be PEND)\n"))
+cat(sprintf("  4. Batchtools logs: %s/logs/\n", reg_dir))
 
 # Write job IDs to file for Python to read (all IDs, not just submitted)
 writeLines(as.character(ids), file.path(reg_dir, "job_ids.txt"))

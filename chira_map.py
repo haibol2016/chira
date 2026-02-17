@@ -890,7 +890,10 @@ def submit_chunks_with_batchtools(args, chunk_files, chunk_dir, alignment_job_ty
         
         # Determine conda environment
         conda_env = args.batchtools_conda_env
-        if not conda_env:
+        if conda_env:
+            # Expand user home directory (~) if present
+            conda_env = os.path.expanduser(conda_env)
+        else:
             conda_env = os.environ.get('CONDA_DEFAULT_ENV', '')
         
         # Create temporary directory for batchtools registry and config files
@@ -1005,17 +1008,155 @@ def submit_chunks_with_batchtools(args, chunk_files, chunk_dir, alignment_job_ty
         return None, None
 
 
-def wait_for_batchtools_jobs(reg_dir, chunk_files, alignment_job_types):
+def query_batchtools_status(reg_dir):
+    """
+    Query batchtools registry to get job status from Python.
+    Makes batchtools jobs "visible" to Python by querying the R registry.
+    
+    Args:
+        reg_dir: Batchtools registry directory
+    
+    Returns:
+        dict: Status information with keys: 'done', 'running', 'error', 'queued', 'total'
+              Returns None if R/batchtools unavailable
+    """
+    import json
+    import tempfile
+    
+    # Create R script to query registry
+    r_script = f'''
+suppressPackageStartupMessages({{
+  library(batchtools)
+  library(jsonlite)
+}})
+
+reg_dir <- "{reg_dir}"
+if (!dir.exists(reg_dir)) {{
+  cat(jsonlite::toJSON(list(error="Registry not found")), "\\n")
+  quit(status=1)
+}}
+
+tryCatch({{
+  reg <- loadRegistry(reg_dir, writeable=FALSE)
+  status <- getStatus(reg)
+  
+  # Get detailed job table
+  job_table <- getJobTable(reg=reg)
+  
+  result <- list(
+    done = sum(job_table$done, na.rm=TRUE),
+    running = sum(job_table$running, na.rm=TRUE),
+    error = sum(job_table$error, na.rm=TRUE),
+    queued = sum(job_table$queued, na.rm=TRUE),
+    total = nrow(job_table),
+    status = as.list(status)
+  )
+  
+  cat(jsonlite::toJSON(result), "\\n")
+}}, error=function(e) {{
+  cat(jsonlite::toJSON(list(error=as.character(e))), "\\n")
+  quit(status=1)
+}})
+'''
+    
+    try:
+        # Write R script to temp file
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.R', delete=False) as f:
+            f.write(r_script)
+            temp_r_script = f.name
+        
+        # Run R script
+        result = subprocess.run(
+            ['Rscript', temp_r_script],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        # Clean up temp file
+        try:
+            os.unlink(temp_r_script)
+        except Exception:
+            pass
+        
+        if result.returncode == 0 and result.stdout.strip():
+            return json.loads(result.stdout.strip())
+        else:
+            return None
+    except Exception:
+        return None
+
+
+def query_lsf_jobs(job_ids=None):
+    """
+    Query LSF directly to get job status from Python.
+    Makes LSF jobs "visible" to Python by calling bjobs.
+    
+    Args:
+        job_ids: Optional list of job IDs to query (if None, queries all user jobs)
+    
+    Returns:
+        dict: Status information with counts of running/pending jobs
+              Returns None if bjobs unavailable
+    """
+    try:
+        if job_ids:
+            # Query specific job IDs
+            cmd = ['bjobs'] + [str(jid) for jid in job_ids]
+        else:
+            # Query all user jobs
+            cmd = ['bjobs', '-u', os.environ.get('USER', '')]
+        
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        
+        if result.returncode != 0:
+            return None
+        
+        # Parse bjobs output
+        lines = result.stdout.strip().split('\n')
+        if len(lines) < 2:  # Header + no jobs
+            return {'running': 0, 'pending': 0, 'total': 0}
+        
+        running = 0
+        pending = 0
+        
+        for line in lines[1:]:  # Skip header
+            parts = line.split()
+            if len(parts) >= 3:
+                status = parts[2]
+                if status == 'RUN':
+                    running += 1
+                elif status in ['PEND', 'PSUSP']:
+                    pending += 1
+        
+        return {
+            'running': running,
+            'pending': pending,
+            'total': running + pending
+        }
+    except Exception:
+        return None
+
+
+def wait_for_batchtools_jobs(reg_dir, chunk_files, alignment_job_types, job_ids=None):
     """
     Wait for batchtools jobs to complete and collect results.
     
-    Uses batchtools registry to check job status efficiently, with fallback
-    to file-based polling if R/batchtools unavailable.
+    Makes batchtools jobs "visible" to Python by querying:
+    1. Batchtools registry via R (most accurate)
+    2. LSF directly via bjobs (fallback)
+    3. File-based completion markers (most reliable for final status)
     
     Args:
         reg_dir: Batchtools registry directory
         chunk_files: List of chunk FASTA file paths
         alignment_job_types: List of alignment job type tuples (to determine which BAM files to collect)
+        job_ids: Optional list of batchtools job IDs (for LSF querying)
     
     Returns:
         dict: Dictionary mapping job_name -> list of chunk BAM file paths
@@ -1042,28 +1183,30 @@ def wait_for_batchtools_jobs(reg_dir, chunk_files, alignment_job_types):
     print(f"      Check registry: {reg_dir}", file=sys.stderr)
     print(f"      Expected job types: {', '.join(expected_job_types)}", file=sys.stderr)
     
-    # Try to use batchtools R API for efficient status checking
-    use_r_api = True
-    try:
-        # Check if we can use R to query batchtools registry
-        result = subprocess.run(
-            ['Rscript', '--version'],
-            capture_output=True,
-            text=True,
-            timeout=2
-        )
-        if result.returncode != 0:
-            use_r_api = False
-    except Exception:
-        use_r_api = False
-    
     max_wait_time = 3600 * 24  # 24 hours max
-    check_interval = 30  # Check every 30 seconds (reduced from polling overhead)
+    check_interval = 30  # Check every 30 seconds
     elapsed = 0
+    last_status_print = 0
     
     while len(completed_chunks) < len(chunk_files) and elapsed < max_wait_time:
         time.sleep(check_interval)
         elapsed += check_interval
+        
+        # Query job status to make jobs "visible" to Python
+        batchtools_status = query_batchtools_status(reg_dir)
+        lsf_status = query_lsf_jobs(job_ids)
+        
+        # Print status every 2 minutes to show jobs are visible
+        if elapsed - last_status_print >= 120:
+            status_msg = f"INFO: Job status ({elapsed//60}m elapsed): "
+            if batchtools_status:
+                status_msg += f"batchtools registry: {batchtools_status.get('done', 0)} done, {batchtools_status.get('running', 0)} running, {batchtools_status.get('error', 0)} error"
+            elif lsf_status:
+                status_msg += f"LSF: {lsf_status.get('running', 0)} running, {lsf_status.get('pending', 0)} pending"
+            else:
+                status_msg += "status unavailable (checking files...)"
+            print(status_msg, file=sys.stderr)
+            last_status_print = elapsed
         
         # Check each chunk for completion (file-based check is most reliable)
         for chunk_file in chunk_files:
@@ -1233,41 +1376,22 @@ def run_bwa_mapping_with_chunking(args, index1, index2):
     print(f"INFO: Total alignment jobs = {len(chunk_files)} chunks × {num_job_types} job types = {len(chunk_files) * num_job_types} jobs", file=sys.stderr)
     
     # Calculate parallel chunks and processes per chunk
-    # IMPORTANT: In batchtools mode, per_chunk_processes should match --batchtools_cores
-    # In single-node mode, it's calculated from --processes and --parallel_chunks
-    use_batchtools = args.use_batchtools if hasattr(args, 'use_batchtools') else False
+    total_processes = args.processes if args.processes is not None else multiprocessing.cpu_count()
+    num_parallel_chunks = min(args.parallel_chunks, len(chunk_files))
+    per_chunk_processes = calculate_per_job_processes(total_processes, num_parallel_chunks)
     
-    if use_batchtools:
-        # BATCHTOOLS MODE: per_chunk_processes should match the cores requested for each LSF job
-        # This ensures BWA uses all available cores on the cluster node
-        if args.batchtools_cores:
-            per_chunk_processes = args.batchtools_cores
-        else:
-            # Default to 8 if not specified (matches default in submit_chunks_with_batchtools)
-            per_chunk_processes = 8
-            print(f"INFO: Using default {per_chunk_processes} processes per chunk (matches --batchtools_cores default)", file=sys.stderr)
-        print(f"INFO: Batchtools mode: Each LSF job will use {per_chunk_processes} processes for BWA alignment", file=sys.stderr)
-        print(f"INFO: Within each chunk, {num_job_types} alignment jobs will run sequentially (each job uses {per_chunk_processes} processes)", file=sys.stderr)
-        # num_parallel_chunks not used in batchtools mode, but set for consistency
-        num_parallel_chunks = len(chunk_files)
-    else:
-        # SINGLE-NODE MODE: Calculate from --processes and --parallel_chunks
-        total_processes = args.processes if args.processes is not None else multiprocessing.cpu_count()
-        num_parallel_chunks = min(args.parallel_chunks, len(chunk_files))
+    # Ensure each chunk gets at least 4 processes (minimum for BWA)
+    if per_chunk_processes < 4:
+        required_processes = args.parallel_chunks * 4
+        num_parallel_chunks = max(1, total_processes // 4)
         per_chunk_processes = calculate_per_job_processes(total_processes, num_parallel_chunks)
-        
-        # Ensure each chunk gets at least 4 processes (minimum for BWA)
-        if per_chunk_processes < 4:
-            required_processes = args.parallel_chunks * 4
-            num_parallel_chunks = max(1, total_processes // 4)
-            per_chunk_processes = calculate_per_job_processes(total_processes, num_parallel_chunks)
-            print(f"WARNING: Not enough processes for {args.parallel_chunks} chunks (need at least {required_processes}, have {total_processes}).", file=sys.stderr)
-            print(f"         Running {num_parallel_chunks} chunks in parallel instead ({per_chunk_processes} processes each).", file=sys.stderr)
-        
-        print(f"INFO: Single-node mode: Using {total_processes} total processes across {num_parallel_chunks} parallel chunks → {per_chunk_processes} processes per chunk", file=sys.stderr)
-        print(f"INFO: Within each chunk, {num_job_types} alignment jobs will run sequentially (each job uses {per_chunk_processes} processes)", file=sys.stderr)
-        if num_parallel_chunks < len(chunk_files):
-            print(f"INFO: Processing {len(chunk_files)} total chunks in batches of {num_parallel_chunks} (limited to prevent resource exhaustion)", file=sys.stderr)
+        print(f"WARNING: Not enough processes for {args.parallel_chunks} chunks (need at least {required_processes}, have {total_processes}).", file=sys.stderr)
+        print(f"         Running {num_parallel_chunks} chunks in parallel instead ({per_chunk_processes} processes each).", file=sys.stderr)
+    
+    print(f"INFO: Using {total_processes} total processes across {num_parallel_chunks} parallel chunks → {per_chunk_processes} processes per chunk", file=sys.stderr)
+    print(f"INFO: Within each chunk, {num_job_types} alignment jobs will run sequentially (each job uses {per_chunk_processes} processes)", file=sys.stderr)
+    if num_parallel_chunks < len(chunk_files):
+        print(f"INFO: Processing {len(chunk_files)} total chunks in batches of {num_parallel_chunks} (limited to prevent resource exhaustion)", file=sys.stderr)
     
     def process_chunk(chunk_file, chunk_idx):
         """
@@ -1329,12 +1453,27 @@ def run_bwa_mapping_with_chunking(args, index1, index2):
         
         if reg_dir and job_ids:
             print(f"INFO: Successfully submitted {len(job_ids)} batchtools jobs", file=sys.stderr)
-            # Pass alignment_job_types to wait function so it knows which BAM files to look for
-            all_chunk_bams = wait_for_batchtools_jobs(reg_dir, chunk_files, alignment_job_types)
+            print(f"      Job IDs: {', '.join(job_ids[:5])}{'...' if len(job_ids) > 5 else ''}", file=sys.stderr)
+            # Pass alignment_job_types and job_ids to wait function so it can query status
+            all_chunk_bams = wait_for_batchtools_jobs(reg_dir, chunk_files, alignment_job_types, job_ids)
             chira_utilities.print_w_time(f"END: All chunks processed via batchtools")
         else:
             print("ERROR: batchtools submission failed. Falling back to single-node mode.", file=sys.stderr)
             use_batchtools = False
+            # Recalculate per_chunk_processes and num_parallel_chunks for single-node mode
+            total_processes = args.processes if args.processes is not None else multiprocessing.cpu_count()
+            num_parallel_chunks = min(args.parallel_chunks, len(chunk_files))
+            per_chunk_processes = calculate_per_job_processes(total_processes, num_parallel_chunks)
+            
+            # Ensure each chunk gets at least 4 processes (minimum for BWA)
+            if per_chunk_processes < 4:
+                required_processes = args.parallel_chunks * 4
+                num_parallel_chunks = max(1, total_processes // 4)
+                per_chunk_processes = calculate_per_job_processes(total_processes, num_parallel_chunks)
+                print(f"WARNING: Not enough processes for {args.parallel_chunks} chunks (need at least {required_processes}, have {total_processes}).", file=sys.stderr)
+                print(f"         Running {num_parallel_chunks} chunks in parallel instead ({per_chunk_processes} processes each).", file=sys.stderr)
+            
+            print(f"INFO: Fallback to single-node mode: Using {total_processes} total processes across {num_parallel_chunks} parallel chunks → {per_chunk_processes} processes per chunk", file=sys.stderr)
     
     if not use_batchtools:
         # THREADPOOLEXECUTOR MODE: Process chunks on single node
