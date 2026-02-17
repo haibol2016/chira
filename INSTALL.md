@@ -48,6 +48,7 @@ pip install -e .[optional]
 
 # This installs:
 # - psutil (for memory optimization and I/O performance)
+# - mpire (for enhanced multiprocessing performance in chira_quantify.py)
 # - requests (for downloading Ensembl files)
 # - pyliftover (for coordinate liftover)
 ```

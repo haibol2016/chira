@@ -1003,6 +1003,14 @@ def wait_for_batchtools_jobs(reg_dir, chunk_files, alignment_job_types, job_ids=
         batchtools_status = query_batchtools_status(reg_dir)
         lsf_status = query_lsf_jobs(job_ids)
         
+        # Check for errors in batchtools registry
+        if batchtools_status and batchtools_status.get('error', 0) > 0:
+            error_count = batchtools_status.get('error', 0)
+            print(f"ERROR: {error_count} batchtools job(s) failed!", file=sys.stderr)
+            print(f"      Check batchtools registry: {reg_dir}", file=sys.stderr)
+            print(f"      Check LSF jobs: bjobs -u $USER", file=sys.stderr)
+            # Don't exit immediately - wait to collect all failure information
+        
         # Print status every 2 minutes to show jobs are visible
         if elapsed - last_status_print >= 120:
             status_msg = f"INFO: Job status ({elapsed//60}m elapsed): "
@@ -1027,6 +1035,7 @@ def wait_for_batchtools_jobs(reg_dir, chunk_files, alignment_job_types, job_ids=
             if os.path.exists(completion_file):
                 # Chunk completed, collect BAM files for expected job types
                 chunk_bams = {}
+                missing_bams = []
                 for job_type in expected_job_types:
                     bam_file = os.path.join(chunk_outdir, job_type + ".bam")
                     if os.path.exists(bam_file):
@@ -1034,6 +1043,15 @@ def wait_for_batchtools_jobs(reg_dir, chunk_files, alignment_job_types, job_ids=
                             all_chunk_bams[job_type] = []
                         all_chunk_bams[job_type].append(bam_file)
                         chunk_bams[job_type] = bam_file
+                    else:
+                        missing_bams.append(job_type)
+                
+                # Verify all expected BAM files exist for this chunk
+                if missing_bams:
+                    print(f"ERROR: Chunk {chunk_idx} marked as completed but missing BAM files: {', '.join(missing_bams)}", file=sys.stderr)
+                    print(f"      Chunk output directory: {chunk_outdir}", file=sys.stderr)
+                    # Don't mark as completed if BAM files are missing
+                    continue
                 
                 completed_chunks.add(chunk_file)
                 print(f"INFO: Chunk {chunk_idx} completed ({len(completed_chunks)}/{len(chunk_files)} total)", file=sys.stderr)
@@ -1042,8 +1060,9 @@ def wait_for_batchtools_jobs(reg_dir, chunk_files, alignment_job_types, job_ids=
         if elapsed % 300 == 0:
             print(f"INFO: Progress: {len(completed_chunks)}/{len(chunk_files)} chunks completed ({elapsed//60} minutes elapsed)", file=sys.stderr)
     
+    # After waiting, check for failures
     if len(completed_chunks) < len(chunk_files):
-        print(f"WARNING: Only {len(completed_chunks)}/{len(chunk_files)} chunks completed within timeout", file=sys.stderr)
+        print(f"ERROR: Only {len(completed_chunks)}/{len(chunk_files)} chunks completed", file=sys.stderr)
         for chunk_file in chunk_files:
             if chunk_file not in completed_chunks:
                 chunk_idx = int(os.path.basename(chunk_file).replace("chunk_", "").replace(".fasta", ""))
@@ -1051,6 +1070,15 @@ def wait_for_batchtools_jobs(reg_dir, chunk_files, alignment_job_types, job_ids=
         print(f"      Failed chunks: {failed_chunks}", file=sys.stderr)
         print(f"      Check logs in: {chunk_dir}/chunk_*_out/", file=sys.stderr)
         print(f"      Or check batchtools registry: {reg_dir}", file=sys.stderr)
+        raise RuntimeError(f"Batchtools jobs failed: {len(failed_chunks)} chunks did not complete")
+    
+    # Final check for errors in batchtools registry
+    final_status = query_batchtools_status(reg_dir)
+    if final_status and final_status.get('error', 0) > 0:
+        error_count = final_status.get('error', 0)
+        print(f"ERROR: {error_count} batchtools job(s) failed in registry", file=sys.stderr)
+        print(f"      Check batchtools registry: {reg_dir}", file=sys.stderr)
+        raise RuntimeError(f"Batchtools jobs failed: {error_count} job(s) reported errors in registry")
     
     return all_chunk_bams
 
@@ -1273,8 +1301,13 @@ def run_bwa_mapping_with_chunking(args, index1, index2):
             print(f"INFO: Successfully submitted {len(job_ids)} batchtools jobs", file=sys.stderr)
             print(f"      Job IDs: {', '.join(job_ids[:5])}{'...' if len(job_ids) > 5 else ''}", file=sys.stderr)
             # Pass alignment_job_types and job_ids to wait function so it can query status
-            all_chunk_bams = wait_for_batchtools_jobs(reg_dir, chunk_files, alignment_job_types, job_ids)
-            chira_utilities.print_w_time(f"END: All chunks processed via batchtools")
+            try:
+                all_chunk_bams = wait_for_batchtools_jobs(reg_dir, chunk_files, alignment_job_types, job_ids)
+                chira_utilities.print_w_time(f"END: All chunks processed via batchtools")
+            except RuntimeError as e:
+                print(f"ERROR: {str(e)}", file=sys.stderr)
+                print(f"      Batchtools job failures detected. Exiting.", file=sys.stderr)
+                sys.exit(1)
         else:
             print("ERROR: batchtools submission failed. Falling back to single-node mode.", file=sys.stderr)
             use_batchtools = False
