@@ -185,11 +185,12 @@ resources <- list(
 )
 
 # Submit jobs
+# batchtools batchMap() supports more.args parameter for constant arguments
 ids <- batchMap(
   fun = process_chunk_job,
   chunk_file = chunks$chunk_file,
   chunk_idx = chunks$chunk_idx,
-  MoreArgs = list(
+  more.args = list(
     chunk_dir = chunk_dir,
     alignment_job_types_json = alignment_job_types_json,
     per_chunk_processes = per_chunk_processes,
