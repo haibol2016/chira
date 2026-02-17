@@ -917,11 +917,25 @@ def submit_chunks_with_batchtools(args, chunk_files, chunk_dir, alignment_job_ty
         # Prepare configuration
         max_parallel = args.batchtools_max_parallel if args.batchtools_max_parallel else len(chunks_data)
         # Default to lsf_custom.tmpl in the same directory as chira_map.py
+        script_dir = os.path.dirname(os.path.abspath(__file__))
         if hasattr(args, 'batchtools_template') and args.batchtools_template:
             template_file = args.batchtools_template
+            # Handle special case: "lsf-simple" is a built-in template name, not a file path
+            if template_file == "lsf-simple":
+                # Keep as-is, R script will handle it
+                pass
+            else:
+                # Resolve relative paths to absolute paths (relative to script directory)
+                if not os.path.isabs(template_file):
+                    template_file = os.path.join(script_dir, template_file)
+                # Normalize the path
+                template_file = os.path.abspath(template_file)
+                # Check if file exists
+                if not os.path.exists(template_file):
+                    print(f"WARNING: Template file not found: {template_file}. Using built-in 'lsf-simple' template.", file=sys.stderr)
+                    template_file = "lsf-simple"
         else:
             # Default: use lsf_custom.tmpl in the ChiRA directory
-            script_dir = os.path.dirname(os.path.abspath(__file__))
             default_template = os.path.join(script_dir, "lsf_custom.tmpl")
             if os.path.exists(default_template):
                 template_file = default_template
