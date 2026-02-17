@@ -388,7 +388,45 @@ def download_mirbase_gff3(output_file, species_code, version=None, timeout=600,
         return False
 
 
-def main():
+def validate_liftover_params(args):
+    """
+    Validate and prepare liftover parameters.
+    
+    Args:
+        args: Parsed arguments
+    
+    Returns:
+        dict: Liftover parameters dict or None if not provided
+    """
+    if args.chain_file:
+        if not args.source_genome or not args.target_genome:
+            print("Error: --source-genome and --target-genome are required when --chain-file is provided", 
+                  file=sys.stderr)
+            sys.exit(1)
+        if not os.path.exists(args.chain_file):
+            print(f"Error: Chain file '{args.chain_file}' not found", file=sys.stderr)
+            sys.exit(1)
+        return {
+            'chain_file': args.chain_file,
+            'source_genome': args.source_genome,
+            'target_genome': args.target_genome
+        }
+    return None
+
+
+def print_download_info(args, liftover_params, chr_mapping):
+    """Print download information."""
+    print(f"Downloading GFF3 file from miRBase...")
+    print(f"Species: {args.species_code}")
+    print(f"Version: {args.mirbase_version or 'CURRENT'}")
+    if liftover_params:
+        print(f"Coordinate liftover: {liftover_params['source_genome']} -> {liftover_params['target_genome']}")
+    if chr_mapping:
+        print(f"Chromosome mapping: {args.chr_mapping_file}")
+
+
+def parse_arguments():
+    """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
         description='Download species-specific GFF3 file from miRBase',
         usage='%(prog)s [-h] [-v,--version]',
@@ -420,37 +458,25 @@ def main():
                         'Requires pyliftover package (install with: pip install pyliftover).')
     parser.add_argument('-v', '--version', action='version', version='%(prog)s 1.0')
     
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+def main():
+    """Main function to orchestrate the miRBase GFF3 download workflow."""
+    args = parse_arguments()
     
-    # Validate liftover parameters
-    liftover_params = None
-    if args.chain_file:
-        if not args.source_genome or not args.target_genome:
-            print("Error: --source-genome and --target-genome are required when --chain-file is provided", 
-                  file=sys.stderr)
-            sys.exit(1)
-        if not os.path.exists(args.chain_file):
-            print(f"Error: Chain file '{args.chain_file}' not found", file=sys.stderr)
-            sys.exit(1)
-        liftover_params = {
-            'chain_file': args.chain_file,
-            'source_genome': args.source_genome,
-            'target_genome': args.target_genome
-        }
+    # Validate and prepare liftover parameters
+    liftover_params = validate_liftover_params(args)
     
     # Read chromosome mapping if provided
     chr_mapping = None
     if args.chr_mapping_file:
         chr_mapping = read_chromosome_mapping(args.chr_mapping_file)
     
-    print(f"Downloading GFF3 file from miRBase...")
-    print(f"Species: {args.species_code}")
-    print(f"Version: {args.mirbase_version or 'CURRENT'}")
-    if liftover_params:
-        print(f"Coordinate liftover: {liftover_params['source_genome']} -> {liftover_params['target_genome']}")
-    if chr_mapping:
-        print(f"Chromosome mapping: {args.chr_mapping_file}")
+    # Print download information
+    print_download_info(args, liftover_params, chr_mapping)
     
+    # Download and process GFF3 file
     if not download_mirbase_gff3(args.output_file, args.species_code, args.mirbase_version, 
                                  args.timeout, chr_mapping, liftover_params):
         print("Error: Failed to download or process GFF3 file from miRBase", file=sys.stderr)

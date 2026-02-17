@@ -82,7 +82,29 @@ def remove_mirna_from_gtf(input_gtf, output_gtf, keep_comments=True, mirna_patte
         sys.exit(1)
 
 
-if __name__ == "__main__":
+def compile_mirna_pattern(pattern_str):
+    """
+    Compile miRNA pattern regex from string.
+    
+    Args:
+        pattern_str: Regex pattern string or None for default pattern
+    
+    Returns:
+        Compiled regex pattern
+    """
+    if pattern_str:
+        try:
+            return re.compile(pattern_str)
+        except re.error as e:
+            print(f"Error: Invalid regular expression pattern: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        # Default pattern for miRNA detection
+        return re.compile(r'gene_name\s+".*mir-.*"|transcript_name\s+".*mir-.*"|gene_biotype\s+"miRNA"|transcript_biotype\s+"miRNA"')
+
+
+def parse_arguments():
+    """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
         description='Remove all microRNA entries from an Ensembl GTF file',
         usage='%(prog)s [-h] [-v,--version]',
@@ -101,23 +123,25 @@ if __name__ == "__main__":
                         help='Remove comment lines from output (default: keep comments)')
     parser.add_argument('-v', '--version', action='version', version='%(prog)s 1.0')
     
-    args = parser.parse_args()
-    
-    # Compile regex pattern if provided
-    mirna_pattern = None
-    if args.mirna_pattern:
-        try:
-            mirna_pattern = re.compile(args.mirna_pattern)
-        except re.error as e:
-            print(f"Error: Invalid regular expression pattern: {e}", file=sys.stderr)
-            sys.exit(1)
-    else:
-        mirna_pattern = re.compile(r'gene_name\s+".*mir-.*"|transcript_name\s+".*mir-.*"|gene_biotype\s+"miRNA"|transcript_biotype\s+"miRNA"')
+    return parser.parse_args()
 
+
+def main():
+    """Main function to orchestrate the miRNA removal workflow."""
+    args = parse_arguments()
+    
+    # Compile regex pattern
+    mirna_pattern = compile_mirna_pattern(args.mirna_pattern)
+    
+    # Remove miRNA entries
     remove_mirna_from_gtf(
         args.input_gtf,
         args.output_gtf,
         keep_comments=not args.remove_comments,
         mirna_pattern=mirna_pattern
     )
+
+
+if __name__ == "__main__":
+    main()
 

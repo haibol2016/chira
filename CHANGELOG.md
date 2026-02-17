@@ -5,6 +5,98 @@ All notable changes to ChiRA will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.10] - 2026-02-15
+
+### Fixed
+- **chira_map.py**:
+  - Fixed batchtools template file path handling to resolve relative paths to absolute paths
+  - Fixed JSON parsing errors in batchtools submission by ensuring all paths are absolute and properly normalized
+  - Fixed `use_batchtools` check by simplifying from `hasattr` check to direct attribute access (argparse guarantees attribute existence)
+  - Added explicit UTF-8 encoding (`encoding='utf-8'`, `ensure_ascii=False`) when writing JSON configuration files
+  - Enhanced error handling for JSON file writing with try-except blocks and detailed error messages
+
+- **submit_chunks_batchtools.R**:
+  - Added file existence checks before JSON parsing
+  - Added `tryCatch` blocks for JSON parsing with detailed error messages and file content previews
+  - Improved error reporting to aid debugging of JSON parsing issues
+
+### Changed
+- **chira_map.py**:
+  - **All paths for batchtools jobs are now absolute paths**:
+    - `reg_dir` (batchtools registry directory)
+    - `chunk_dir` (chunk output directory)
+    - `python_script` (process_chunk_batchtools.py path)
+    - `template_file` (LSF template file path, except for built-in "lsf-simple")
+    - `chunk_file` (individual chunk FASTA file paths in chunks.json)
+    - `refindex` (BWA reference index paths in alignment_job_types)
+  - Ensures batchtools jobs running on cluster nodes can correctly resolve all file paths
+  - All paths are normalized using `os.path.abspath()` and `os.path.normpath()` before being written to JSON
+  - Moved `parse_arguments()` function to the end of the file, just before `main()`
+
+- **process_chunk_batchtools.py**:
+  - Refactored to extract argument parsing into `parse_arguments()` function
+  - Extracted main execution flow into `main()` function
+  - Moved `parse_arguments()` to the end of the file, just before `main()`
+  - Improved code organization and maintainability
+
+- **chira_quantify.py**:
+  - Refactored to extract complex procedures from `main()` section:
+    - Extracted `print_configuration(args)` function
+    - Extracted `write_crl_output(loci_file, output_file, d_read_crl_fractions, d_crl_tpms)` function
+    - Extracted `finalize_output(outdir, temp_file, final_file)` function
+  - Moved `parse_arguments()` to the end of the file, just before `main()`
+  - Improved code organization and readability
+
+- **chira_merge.py**:
+  - Refactored to extract complex procedures from `main()` section:
+    - Extracted `print_configuration(args)` function
+    - Extracted `setup_references(args)` function
+    - Extracted `process_segments(args, d_reflen1, d_reflen2)` function
+    - Extracted `merge_loci(args)` function
+  - Moved `parse_arguments()` to the end of the file, just before `main()`
+  - Improved code organization and readability
+
+- **chira_collapse.py**:
+  - Refactored to extract complex procedures from `main()` section:
+    - Extracted `print_configuration(args)` function
+    - Extracted `collapse_fastq_to_fasta(fastq_file, fasta_file, umi_len)` function
+  - Added `parse_arguments()` function and moved it to the end of the file, just before `main()`
+  - Improved code organization and readability
+
+- **download_mirbase_gff3.py**:
+  - Refactored to extract complex procedures from `main()` section:
+    - Extracted `validate_liftover_params(args)` function
+    - Extracted `print_download_info(args, liftover_params, chr_mapping)` function
+  - Moved `parse_arguments()` to the end of the file, just before `main()`
+  - Improved code organization and readability
+
+- **remove_mirna_hairpin_from_gtf.py**:
+  - Refactored to extract complex procedures from `main()` section:
+    - Extracted `compile_mirna_pattern(pattern_str)` function
+  - Added `parse_arguments()` function and moved it to the end of the file, just before `main()`
+  - Improved code organization and readability
+
+- **concatenate_gtf.py**:
+  - Added `parse_arguments()` function and moved it to the end of the file, just before `main()`
+  - Extracted main execution flow into `main()` function
+  - Improved code organization and maintainability
+
+- **extract_transcripts_from_genome.py**:
+  - Added `parse_arguments()` function and moved it to the end of the file, just before `main()`
+  - Extracted main execution flow into `main()` function
+  - Improved code organization and maintainability
+
+- **download_mirbase_mature.py**:
+  - Refactored to extract complex procedures from `main()` section:
+    - Extracted `cleanup_temp_file(temp_file, keep_file)` function
+  - Moved `parse_arguments()` to the end of the file, just before `main()`
+  - Improved code organization and readability
+
+- **download_ensembl.py**:
+  - Added `parse_arguments()` function and moved it to the end of the file, just before `main()`
+  - Extracted main execution flow into `main()` function
+  - Improved code organization and maintainability
+
 ## [1.4.9] - 2026-02-15
 
 ### Added

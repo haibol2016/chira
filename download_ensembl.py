@@ -287,7 +287,8 @@ def download_ensembl_files(species, genome_version, gtf_version, output_dir,
     return downloaded_files
 
 
-if __name__ == "__main__":
+def parse_arguments():
+    """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
         description='Download cDNA, ncRNA, GTF, and genome FASTA files from Ensembl',
         usage='%(prog)s [-h] [-v,--version]',
@@ -312,7 +313,12 @@ if __name__ == "__main__":
                         metavar='', help='Download timeout in seconds')
     parser.add_argument('-v', '--version', action='version', version='%(prog)s 1.0')
     
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+def main():
+    """Main function to orchestrate the Ensembl download workflow."""
+    args = parse_arguments()
     
     # Normalize species name (lowercase, replace spaces with underscores)
     species = args.species.lower().replace(' ', '_')
@@ -327,4 +333,8 @@ if __name__ == "__main__":
         decompress=not args.no_decompress,
         timeout=args.timeout
     )
+
+
+if __name__ == "__main__":
+    main()
 

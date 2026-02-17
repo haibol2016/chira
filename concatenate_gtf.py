@@ -72,7 +72,8 @@ def concatenate_gtf_files(mirna_gtf, target_gtf, output_gtf, keep_target_comment
         sys.exit(1)
 
 
-if __name__ == "__main__":
+def parse_arguments():
+    """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
         description='Concatenate mature miRNA GTF/GFF3 file with target transcriptome GTF file',
         usage='%(prog)s [-h] [-v,--version]',
@@ -89,7 +90,12 @@ if __name__ == "__main__":
                         help='Remove comment lines from target GTF as well (default: keep target comments)')
     parser.add_argument('-v', '--version', action='version', version='%(prog)s 1.0')
     
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+def main():
+    """Main function to orchestrate the GTF concatenation workflow."""
+    args = parse_arguments()
     
     concatenate_gtf_files(
         args.mirna_gtf,
@@ -97,4 +103,8 @@ if __name__ == "__main__":
         args.output_gtf,
         keep_target_comments=not args.remove_target_comments
     )
+
+
+if __name__ == "__main__":
+    main()
 

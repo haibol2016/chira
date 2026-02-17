@@ -1,13 +1,15 @@
 # ChiRA - Chimeric Read Analyzer
 
-**Version**: 1.4.8 (Modified with performance optimizations and parallel computing support)
+**Version**: 1.4.10 (Modified with performance optimizations and parallel computing support)
 
 ChiRA is a set of tools to analyze RNA-RNA interactome experimental data such as CLASH, CLEAR-CLIP, PARIS, SPLASH etc. Following are the descriptions of the each tool. Here we provide descriptions about the input and ouptput files. For the detailed description of the other parameters please look at the help texts of tools.
 
 **Note**: This is a modified version of ChiRA (based on v1.4.3) with significant performance optimizations and new features. The original code is licensed under GPL v3, and this modified version maintains the same license. All changes are documented in the "Recent Improvements" section below and in [CHANGELOG.md](CHANGELOG.md).
 
 ## Version History
-- **v1.4.8** (Current, 2026-02-15): Improved chunk-based parallelization for very large transcript counts (e.g., human genome with 387K+ transcripts), variable naming consistency improvements, and bug fixes in chira_merge.py
+- **v1.4.10** (Current, 2026-02-15): Fixed batchtools submission issues (template path handling, JSON parsing), ensured all paths are absolute for cluster jobs, and refactored scripts for better code organization
+- **v1.4.9** (2026-02-15): Added `--parallel_chunks` parameter for configurable chunk parallelism in chira_map.py
+- **v1.4.8** (2026-02-15): Improved chunk-based parallelization for very large transcript counts (e.g., human genome with 387K+ transcripts), variable naming consistency improvements, and bug fixes in chira_merge.py
 - **v1.4.7** (2026-02-15): New utility scripts (extract_transcripts_from_genome.py), U→T conversion in download_mirbase_mature.py, gffread support, and removal of deprecated scripts
 - **v1.4.6** (2026-02-15): Multiprocessing improvements, adaptive I/O buffer sizing, FASTA chunking, I/O bottleneck detection, and code refactoring
 - **v1.4.5** (2026-02-02): Parallel computing support, I/O optimizations, automatic memory management, and enhanced performance
@@ -200,6 +202,12 @@ If you prefer to install dependencies manually:
 - pyliftover (for `download_mirbase_gff3.py` coordinate liftover)
 - requests (for `download_ensembl.py`)
 
+**Optional R packages (for batchtools HPC cluster support):**
+- **batchtools** and **jsonlite** (required for `--use_batchtools` option in `chira_map.py`)
+  - Install with: `conda install -c conda-forge r-batchtools r-jsonlite`
+  - Or in R: `install.packages(c("batchtools", "jsonlite"))`
+  - See [BATCHTOOLS_USAGE.md](BATCHTOOLS_USAGE.md) for detailed usage instructions
+
 **Command-line tools:**
 - bwa (recommended for alignment)
 - samtools
@@ -239,6 +247,8 @@ conda install -c bioconda clan  # Alternative aligner to BWA in chira_map.py
 ```
 
 For a complete list of dependencies, see [DEPENDENCIES.md](DEPENDENCIES.md).
+
+For batchtools HPC cluster usage, see [BATCHTOOLS_USAGE.md](BATCHTOOLS_USAGE.md).
 
 ---
 
@@ -639,6 +649,19 @@ A split reference uses two separate reference FASTA files instead of one combine
     - Example: `--processes 32 --parallel_chunks 4` → 8 processes per chunk (good)
     - Example: `--processes 8 --parallel_chunks 4` → 2 processes per chunk (too few, will auto-reduce)
   - **Note**: Only takes effect when `--chunk_fasta` is specified
+- `--use_batchtools`: Enable batchtools for HPC cluster job submission (optional, for LSF/SLURM clusters)
+  - **Requirements**: R with `batchtools` and `jsonlite` packages installed
+  - **Benefits**: Submit chunk jobs to cluster scheduler for true parallel processing across cluster nodes
+  - **Path handling**: All file paths are automatically converted to absolute paths for cluster job execution
+  - **Additional parameters** (required when `--use_batchtools` is specified):
+    - `--batchtools_queue`: LSF queue name (e.g., `long`, `short`)
+    - `--batchtools_cores`: Cores per LSF job (e.g., `8`)
+    - `--batchtools_memory`: Total memory per LSF job (e.g., `8GB`, automatically converted to per-core for LSF)
+    - `--batchtools_walltime`: Walltime limit per job (e.g., `240:00`)
+    - `--batchtools_max_parallel`: Max concurrent running jobs (optional, default: unlimited)
+    - `--batchtools_conda_env`: Conda environment path (optional, auto-detected if not specified)
+    - `--batchtools_template`: LSF template file path (optional, default: `lsf_custom.tmpl`, can use built-in `"lsf-simple"`)
+  - **Example**: See [BATCHTOOLS_USAGE.md](BATCHTOOLS_USAGE.md) for detailed usage instructions and examples
 
 **Outputs:**
 - `sorted.bam`: Sorted BAM file
@@ -675,6 +698,19 @@ chira_map.py -i large_reads.fasta -o output_dir \
 # - Processes remaining 6 chunks in subsequent batches of 4
 chira_map.py -i large_reads.fasta -o output_dir \
    -f1 ref1.fasta -f2 ref2.fasta -a bwa -s both -p 32 --chunk_fasta 10 --parallel_chunks 4
+
+# Example 3: Using batchtools for HPC cluster submission (LSF)
+# - Splits FASTA into 20 chunks
+# - Submits 20 independent LSF jobs (one per chunk)
+# - Each job runs on different cluster node with 8 cores and 8GB memory
+# - All paths automatically converted to absolute paths for cluster execution
+chira_map.py -i large_reads.fasta -o output_dir \
+   -f1 ref1.fasta -f2 ref2.fasta -a bwa -s both \
+   --chunk_fasta 20 --use_batchtools \
+   --batchtools_queue long \
+   --batchtools_cores 8 \
+   --batchtools_memory 8GB \
+   --batchtools_walltime 240:00
 ```
 
 **Understanding Chunking and Process Management:**

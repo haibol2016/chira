@@ -442,248 +442,6 @@ def calculate_per_job_processes(total_processes, num_parallel_units):
     return per_job
 
 
-def parse_arguments():
-    """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(description='Chimeric Read Annotator: map reads to the reference',
-                                     usage='%(prog)s [-h] [-v,--version]',
-                                     formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-
-    parser.add_argument("-a", '--aligner', type=str, choices=["bwa", "clan"], default='bwa', required=False,
-                        dest='aligner', metavar='', help='Alignment program to use, bwa or clan')
-
-    parser.add_argument('-i', '--query_fasta', action='store', dest='fasta', required=True,
-                        metavar='', help='Path to query fasta file')
-
-    parser.add_argument('-o', '--outdir', action='store', dest='outdir', required=True, metavar='',
-                        help='Output directory path for the analysis')
-
-    parser.add_argument('-x1', '--index1', action='store', dest='idx1', required=False,
-                        metavar='', help='first priority index file')
-
-    parser.add_argument('-x2', '--index2', action='store', dest='idx2', required=False,
-                        metavar='', help='second priority index file')
-
-    parser.add_argument('-f1', '--ref_fasta1', action='store', dest='ref_fasta1', required=False,
-                        metavar='', help='First priority fasta file')
-
-    parser.add_argument('-f2', '--ref_fasta2', action='store', dest='ref_fasta2', required=False,
-                        metavar='', help='second priority fasta file')
-
-    parser.add_argument("-b", '--build', action='store_true', dest='build_index',
-                        help="Build indices from reference fasta files")
-
-    parser.add_argument('-p', '--processes', action='store', type=int, default=None, metavar='',
-                        dest='processes',
-                        help='''Total number of CPU processes/threads to use across all BWA alignment jobs.
-
-HOW TO SET --processes:
-- GENERAL RULE: Set to the total number of CPU cores available on your system
-  * Example: 32-core system → --processes 32
-  * Example: 16-core system → --processes 16
-  * Example: 8-core system → --processes 8
-- DEFAULT: If not specified, uses all available CPU cores (auto-detected)
-- For shared systems: Set to number of cores allocated to your job
-- For memory-constrained systems: Reduce if you encounter out-of-memory errors
-
-HOW IT WORKS:
-- WITHOUT CHUNKING: Total processes are divided among parallel BWA jobs
-  * 2 jobs if only index1 is used (long + short)
-  * 4 jobs if both index1 and index2 are used (long + short × 2 indices)
-  * Example: 32 processes, 4 jobs → 8 processes per job (32 total)
-- WITH CHUNKING (single-node mode, NO --use_batchtools):
-  * Total processes divided among parallel chunks (controlled by --parallel_chunks, default: 2)
-  * Example: 32 processes, --parallel_chunks 2 → 16 processes per chunk
-  * Example: 32 processes, --parallel_chunks 4 → 8 processes per chunk
-  * Each chunk processes jobs sequentially using all allocated processes
-- WITH CHUNKING (cluster mode, WITH --use_batchtools):
-  * IMPORTANT: LSF jobs run on DIFFERENT cluster nodes, independent of main job
-  * --processes applies to main job only (which just submits and waits, minimal CPU needed)
-  * --batchtools_cores controls cores for EACH LSF job (which runs BWA on cluster nodes)
-  * These are COMPLETELY INDEPENDENT - main job doesn't need many cores
-  * Example: --batchtools_cores 16 → Each LSF job uses 16 cores (regardless of --processes)
-
-Note: This controls BWA alignment threads. Samtools operations (merge, sort)
-may use additional threads based on available resources.''')
-
-    parser.add_argument('--sort_memory', action='store', type=str, default=None, metavar='',
-                        dest='sort_memory',
-                        help='Memory per thread for BAM sorting (e.g., "2G", "3G"). '
-                             'If not specified, automatically calculates based on available RAM. '
-                             'More memory reduces temporary files and I/O, improving performance. '
-                             'Total memory used = sort_memory × processes, so ensure sufficient RAM.')
-
-    parser.add_argument("-s", '--stranded', type=str, choices=["fw", "rc", "both"], default='fw', metavar='',
-                        dest='stranded',
-                        help='''Strand-specificity of input samples.
-                             fw = map to transcript strand (default, recommended for most protocols like CLASH, CLEAR-CLIP, PARIS, SPLASH);
-                             rc = map to reverse complement of transcript strand (use if your library protocol produces reads from antisense strand);
-                             both = map on both strands (use only for unstranded libraries where strand information is not preserved).
-                             
-                             When to use:
-                             - Most RNA-RNA interactome protocols (CLASH, CLEAR-CLIP, PARIS, SPLASH) are stranded and use "fw"
-                             - Use "rc" only if you know your protocol produces reads from the reverse complement strand
-                             - Use "both" only for unstranded libraries (rare for interactome protocols)
-                             
-                             Stranded mapping filters out alignments on the wrong strand, reducing false positives and improving chimeric read detection.''')
-
-    parser.add_argument("-l1", '--seed_length1', action='store', type=int, default=12, metavar='',
-                        dest='seed_length1',
-                        help='''Seed length for 1st mapping iteration.
-                                bwa-mem parameter "-k"''')
-
-    parser.add_argument("-l2", '--seed_length2', action='store', type=int, default=16, metavar='',
-                        dest='seed_length2',
-                        help='''Seed length for 2nd mapping iteration.
-                                bwa-mem parameter "-k"''')
-
-    parser.add_argument("-s1", '--align_score1', action='store', type=int, default=18, metavar='',
-                        dest='align_score1',
-                        help='''Minimum alignment score in 1st mapping iteration.
-                                bwa-mem parameter "-T" and clan_search parameter "-l"''')
-
-    parser.add_argument("-s2", '--align_score2', action='store', type=int, default=16, metavar='',
-                        dest='align_score2',
-                        help='''Minimum alignment score in 2nd mapping iteration.
-                                It must be smaller than --align_score1 parameter.
-                                bwa-mem parameter "-T" and clan_search parameter "-l"''')
-
-    parser.add_argument("-ma1", '--match1', action='store', type=int, default=1, metavar='',
-                        dest='match1',
-                        help='Matching score for 1st mapping iteration.')
-
-    parser.add_argument("-mm1", '--mismatch1', action='store', type=int, default=4, metavar='',
-                        dest='mismatch1',
-                        help='Mismatch penalty for 1st mapping iteration.')
-
-    parser.add_argument("-ma2", '--match2', action='store', type=int, default=1, metavar='',
-                        dest='match2',
-                        help='Matching score for 2nd mapping iteration.')
-
-    parser.add_argument("-mm2", '--mismatch2', action='store', type=int, default=6, metavar='',
-                        dest='mismatch2',
-                        help='Mismatch penalty for 2nd mapping iteration.')
-
-    parser.add_argument("-go1", '--gapopen1', action='store', type=int, default=6, metavar='',
-                        dest='gapopen1',
-                        help='Gap opening penalty for 1st mapping iteration.')
-
-    parser.add_argument("-ge1", '--gapext1', action='store', type=int, default=1, metavar='',
-                        dest='gapext1',
-                        help='Gap extension penalty for 1st mapping iteration.')
-
-    parser.add_argument("-go2", '--gapopen2', action='store', type=int, default=100, metavar='',
-                        dest='gapopen2',
-                        help='Gap opening penalty for 2nd mapping iteration.')
-
-    parser.add_argument("-ge2", '--gapext2', action='store', type=int, default=100, metavar='',
-                        dest='gapext2',
-                        help='Gap extension penalty for 2nd mapping iteration.')
-
-    parser.add_argument("-h1", '--nhits1', action='store', type=int, default=50, metavar='',
-                        dest='nhits1',
-                        help='Number of allowed multi hits per read')
-
-    parser.add_argument("-h2", '--nhits2', action='store', type=int, default=100, metavar='',
-                        dest='nhits2',
-                        help='Number of allowed multi hits per read in 2nd iteration')
-
-    parser.add_argument('-co', '--chimeric_overlap', action='store', type=int, default=2, metavar='',
-                        dest='chimeric_overlap',
-                        help='Maximum number of bases allowed between the chimeric segments of a read')
-
-    parser.add_argument('--chunk_fasta', action='store', type=int, default=None, metavar='',
-                        dest='chunk_fasta',
-                        help='''Split input FASTA into N chunks for parallel processing (recommended for files >1GB).
-
-Set N to create 1-3GB chunks: N ≈ file_size_GB / desired_chunk_size_GB.
-Example: 20GB file → --chunk_fasta 10 (creates ~2GB chunks).
-
-Single-node: Process chunks in batches via --parallel_chunks (default: 2).
-Cluster: Distribute chunks via --use_batchtools.
-
-Benefits: Better I/O, lower memory per job, scalable parallelism.
-Use for: Large files (>1GB), memory constraints, I/O bottlenecks.''')
-
-    parser.add_argument('--parallel_chunks', action='store', type=int, default=2, metavar='',
-                        dest='parallel_chunks',
-                        help='''Number of chunks to process simultaneously in single-node mode (default: 2).
-
-Only used when --use_batchtools is NOT specified. For cluster mode, use --use_batchtools instead.
-
-Recommendations: Small systems (<16 cores): 1, Medium (16-32 cores): 2, Large (>32 cores): 2-4.
-Each chunk needs ~4GB memory and 4-8 CPUs. Ensure: parallel_chunks × 4-8 ≤ --processes.''')
-
-    parser.add_argument('--use_batchtools', action='store_true', dest='use_batchtools',
-                        help='''Use R batchtools to submit chunk processing jobs to LSF cluster.
-
-Requires: R with batchtools package installed, LSF scheduler, shared filesystem.
-Only effective when --chunk_fasta is specified.''')
-
-    parser.add_argument('--batchtools_queue', action='store', type=str, default='long', metavar='',
-                        dest='batchtools_queue',
-                        help='LSF queue name for batchtools jobs (default: long)')
-
-    parser.add_argument('--batchtools_cores', action='store', type=int, default=None, metavar='',
-                        dest='batchtools_cores',
-                        help='''Number of cores per batchtools LSF job (default: 8 if not specified).
-
-IMPORTANT: In batchtools mode, LSF jobs run on DIFFERENT cluster nodes, independent of the main job.
-- --processes: Applies to the MAIN job (which submits and waits), NOT to LSF jobs
-- --batchtools_cores: Directly sets cores for EACH LSF job running on cluster nodes
-
-These are COMPLETELY INDEPENDENT:
-- Main job (--processes): Just submits jobs, minimal CPU needed
-- LSF jobs (--batchtools_cores): Run BWA alignment on cluster nodes, need 8-16 cores each
-
-Example: --batchtools_cores 8 → Each LSF job gets 8 cores (regardless of --processes)
-Example: --batchtools_cores 16 → Each LSF job gets 16 cores
-
-Should match your LSF job script: #BSUB -n parameter.''')
-
-    parser.add_argument('--batchtools_memory', action='store', type=str, default=None, metavar='',
-                        dest='batchtools_memory',
-                        help='''Total memory per batchtools job (automatically converted to per-core for LSF), e.g., "16GB" (default: auto-calculated).
-
-IMPORTANT: You specify TOTAL memory, but LSF rusage[mem=...] is PER CORE.
-The code automatically converts: total_memory ÷ cores = per_core_memory.
-Example: --batchtools_cores 8 --batchtools_memory 16GB → LSF gets rusage[mem=2GB] (16GB ÷ 8 = 2GB per core).
-Auto-calculation: cores × 0.5GB total (e.g., 8 cores → 4GB total → 0.5GB per core for LSF).''')
-
-    parser.add_argument('--batchtools_walltime', action='store', type=str, default='240:00', metavar='',
-                        dest='batchtools_walltime',
-                        help='Walltime limit for batchtools jobs, e.g., "240:00" (default: 240:00).')
-
-    parser.add_argument('--batchtools_max_parallel', action='store', type=int, default=None, metavar='',
-                        dest='batchtools_max_parallel',
-                        help='''Maximum number of LSF jobs to run simultaneously (default: unlimited).
-                                If set, jobs are submitted in batches and the script waits for each batch
-                                to complete before submitting the next batch. This ensures only the specified
-                                number of jobs are running at any time.
-                                Example: --chunk_fasta 20 --batchtools_max_parallel 2 → only 2 jobs run at a time, all 20 will be processed sequentially.''')
-
-    parser.add_argument('--batchtools_template', action='store', type=str, default=None, metavar='',
-                        dest='batchtools_template',
-                        help='''Path to LSF template file for batchtools (default: lsf_custom.tmpl in ChiRA directory).
-                                The default template (lsf_custom.tmpl) is based on proven InPAS implementation.
-                                Specify a different template only if you need custom LSF directives or module loads.
-                                To use built-in "lsf-simple": set to "lsf-simple" (not recommended).''')
-
-    parser.add_argument('--batchtools_conda_env', action='store', type=str, default=None, metavar='',
-                        dest='batchtools_conda_env',
-                        help='''Conda environment for batchtools jobs (default: auto-detect from CONDA_DEFAULT_ENV).
-                                Ensures ChiRA dependencies are available on worker nodes.
-                                Example: --batchtools_conda_env chira_env''')
-
-    parser.add_argument('-v', '--version', action='version', version=f'%(prog)s {chira_utilities.__version__}')
-
-    args = parser.parse_args()
-    # Set default processes to CPU count if not specified
-    if args.processes is None:
-        args.processes = multiprocessing.cpu_count()
-    
-    return args
-
-
 def validate_arguments(args):
     """Validate command-line arguments."""
     if not args.idx1 and not args.ref_fasta1:
@@ -897,22 +655,35 @@ def submit_chunks_with_batchtools(args, chunk_files, chunk_dir, alignment_job_ty
             conda_env = os.environ.get('CONDA_DEFAULT_ENV', '')
         
         # Create temporary directory for batchtools registry and config files
-        reg_dir = os.path.join(args.outdir, f"batchtools_registry_{int(time.time())}")
+        # Ensure outdir is absolute and normalized
+        outdir_abs = os.path.abspath(args.outdir)
+        reg_dir = os.path.join(outdir_abs, f"batchtools_registry_{int(time.time())}")
+        # Normalize the path to remove any double slashes or other issues
+        reg_dir = os.path.normpath(reg_dir)
         os.makedirs(reg_dir, exist_ok=True)
         
         # Prepare chunk data
+        # IMPORTANT: All paths must be absolute for batchtools jobs running on different cluster nodes
         chunks_data = []
         for chunk_file in chunk_files:
             chunk_idx = int(os.path.basename(chunk_file).replace("chunk_", "").replace(".fasta", ""))
+            # Convert chunk_file to absolute path - critical for cluster jobs
+            chunk_file_abs = os.path.abspath(chunk_file)
             chunks_data.append({
-                "chunk_file": chunk_file,
+                "chunk_file": chunk_file_abs,
                 "chunk_idx": chunk_idx
             })
         
         # Convert alignment_job_types to JSON-serializable format
+        # IMPORTANT: Ensure all paths (especially refindex) are absolute for cluster jobs
         alignment_job_types_list = []
         for job_type in alignment_job_types:
-            alignment_job_types_list.append(list(job_type))
+            job_type_list = list(job_type)
+            # job_type format: (align_type, index_type, refindex, seed_length, align_score, ...)
+            # refindex is at index 2 - convert to absolute path if it's a string path
+            if len(job_type_list) > 2 and job_type_list[2] and isinstance(job_type_list[2], str):
+                job_type_list[2] = os.path.abspath(job_type_list[2])
+            alignment_job_types_list.append(job_type_list)
         
         # Prepare configuration
         max_parallel = args.batchtools_max_parallel if args.batchtools_max_parallel else len(chunks_data)
@@ -963,11 +734,33 @@ def submit_chunks_with_batchtools(args, chunk_files, chunk_dir, alignment_job_ty
         config_file = os.path.join(reg_dir, "config.json")
         chunks_file = os.path.join(reg_dir, "chunks.json")
         
-        with open(config_file, 'w') as f:
-            json.dump(config, f, indent=2)
+        # CRITICAL: Ensure all paths are absolute and properly formatted
+        # Batchtools jobs run on different cluster nodes, so relative paths won't work.
+        # All paths must be absolute:
+        # - reg_dir: Registry directory (already absolute from above)
+        # - chunk_dir: Directory containing chunks (already absolute from above)
+        # - python_script: Path to process_chunk_batchtools.py script
+        # - template_file: LSF template file path (if not built-in "lsf-simple")
+        # - chunk_file paths in chunks_data: Already converted to absolute above
+        # - refindex paths in alignment_job_types_list: Already converted to absolute above
+        config['reg_dir'] = os.path.abspath(reg_dir)
+        config['chunk_dir'] = os.path.abspath(chunk_dir)
+        config['python_script'] = os.path.abspath(config['python_script'])
+        if config.get('template_file') and config['template_file'] != "lsf-simple":
+            config['template_file'] = os.path.abspath(config['template_file'])
         
-        with open(chunks_file, 'w') as f:
-            json.dump(chunks_data, f, indent=2)
+        # Write JSON files with ensure_ascii=False to handle unicode properly
+        try:
+            with open(config_file, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=2, ensure_ascii=False)
+            
+            with open(chunks_file, 'w', encoding='utf-8') as f:
+                json.dump(chunks_data, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"ERROR: Failed to write JSON files: {e}", file=sys.stderr)
+            print(f"      config_file: {config_file}", file=sys.stderr)
+            print(f"      chunks_file: {chunks_file}", file=sys.stderr)
+            return None, None
         
         # Get path to R script
         r_script = os.path.abspath(os.path.join(os.path.dirname(__file__), "submit_chunks_batchtools.R"))
@@ -1373,7 +1166,10 @@ def run_bwa_mapping_with_chunking(args, index1, index2):
     - Cluster mode: Distribute across nodes with --use_batchtools for maximum speedup
     """
     chira_utilities.print_w_time(f"START: Splitting FASTA into {args.chunk_fasta} chunks")
-    chunk_dir = os.path.join(args.outdir, "chunks")
+    # Ensure outdir is absolute and normalized
+    outdir_abs = os.path.abspath(args.outdir)
+    chunk_dir = os.path.join(outdir_abs, "chunks")
+    chunk_dir = os.path.normpath(chunk_dir)
     os.makedirs(chunk_dir, exist_ok=True)
     chunk_files = split_fasta_into_chunks(args.fasta, chunk_dir, args.chunk_fasta)
     chira_utilities.print_w_time(f"END: Split into {len(chunk_files)} chunks")
@@ -1453,7 +1249,15 @@ def run_bwa_mapping_with_chunking(args, index1, index2):
         return int(basename.replace("chunk_", "").replace(".fasta", ""))
     
     # Choose batch computing method: batchtools (cluster) or ThreadPoolExecutor (single-node)
-    use_batchtools = args.use_batchtools if hasattr(args, 'use_batchtools') else False
+    # argparse with action='store_true' always sets the attribute (True if flag present, False otherwise)
+    # Direct access: args.use_batchtools will be True if --use_batchtools flag was provided
+    use_batchtools = args.use_batchtools
+    
+    # Diagnostic output to verify batchtools flag is set correctly
+    if use_batchtools:
+        print(f"INFO: Batchtools mode enabled - will submit {len(chunk_files)} chunks as LSF jobs", file=sys.stderr)
+    else:
+        print(f"INFO: Single-node mode - will process {len(chunk_files)} chunks locally with ThreadPoolExecutor", file=sys.stderr)
     
     if use_batchtools:
         # BATCHTOOLS MODE: Submit jobs directly via R batchtools
@@ -1858,6 +1662,248 @@ def process_bed_file(args):
               + " > " + os.path.join(args.outdir, "sorted.bed"))
     chira_utilities.print_w_time("END: Sorting BED file")
     os.remove(os.path.join(args.outdir, "mapped.bed"))
+
+
+def parse_arguments():
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(description='Chimeric Read Annotator: map reads to the reference',
+                                     usage='%(prog)s [-h] [-v,--version]',
+                                     formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+
+    parser.add_argument("-a", '--aligner', type=str, choices=["bwa", "clan"], default='bwa', required=False,
+                        dest='aligner', metavar='', help='Alignment program to use, bwa or clan')
+
+    parser.add_argument('-i', '--query_fasta', action='store', dest='fasta', required=True,
+                        metavar='', help='Path to query fasta file')
+
+    parser.add_argument('-o', '--outdir', action='store', dest='outdir', required=True, metavar='',
+                        help='Output directory path for the analysis')
+
+    parser.add_argument('-x1', '--index1', action='store', dest='idx1', required=False,
+                        metavar='', help='first priority index file')
+
+    parser.add_argument('-x2', '--index2', action='store', dest='idx2', required=False,
+                        metavar='', help='second priority index file')
+
+    parser.add_argument('-f1', '--ref_fasta1', action='store', dest='ref_fasta1', required=False,
+                        metavar='', help='First priority fasta file')
+
+    parser.add_argument('-f2', '--ref_fasta2', action='store', dest='ref_fasta2', required=False,
+                        metavar='', help='second priority fasta file')
+
+    parser.add_argument("-b", '--build', action='store_true', dest='build_index',
+                        help="Build indices from reference fasta files")
+
+    parser.add_argument('-p', '--processes', action='store', type=int, default=None, metavar='',
+                        dest='processes',
+                        help='''Total number of CPU processes/threads to use across all BWA alignment jobs.
+
+HOW TO SET --processes:
+- GENERAL RULE: Set to the total number of CPU cores available on your system
+  * Example: 32-core system → --processes 32
+  * Example: 16-core system → --processes 16
+  * Example: 8-core system → --processes 8
+- DEFAULT: If not specified, uses all available CPU cores (auto-detected)
+- For shared systems: Set to number of cores allocated to your job
+- For memory-constrained systems: Reduce if you encounter out-of-memory errors
+
+HOW IT WORKS:
+- WITHOUT CHUNKING: Total processes are divided among parallel BWA jobs
+  * 2 jobs if only index1 is used (long + short)
+  * 4 jobs if both index1 and index2 are used (long + short × 2 indices)
+  * Example: 32 processes, 4 jobs → 8 processes per job (32 total)
+- WITH CHUNKING (single-node mode, NO --use_batchtools):
+  * Total processes divided among parallel chunks (controlled by --parallel_chunks, default: 2)
+  * Example: 32 processes, --parallel_chunks 2 → 16 processes per chunk
+  * Example: 32 processes, --parallel_chunks 4 → 8 processes per chunk
+  * Each chunk processes jobs sequentially using all allocated processes
+- WITH CHUNKING (cluster mode, WITH --use_batchtools):
+  * IMPORTANT: LSF jobs run on DIFFERENT cluster nodes, independent of main job
+  * --processes applies to main job only (which just submits and waits, minimal CPU needed)
+  * --batchtools_cores controls cores for EACH LSF job (which runs BWA on cluster nodes)
+  * These are COMPLETELY INDEPENDENT - main job doesn't need many cores
+  * Example: --batchtools_cores 16 → Each LSF job uses 16 cores (regardless of --processes)
+
+Note: This controls BWA alignment threads. Samtools operations (merge, sort)
+may use additional threads based on available resources.''')
+
+    parser.add_argument('--sort_memory', action='store', type=str, default=None, metavar='',
+                        dest='sort_memory',
+                        help='Memory per thread for BAM sorting (e.g., "2G", "3G"). '
+                             'If not specified, automatically calculates based on available RAM. '
+                             'More memory reduces temporary files and I/O, improving performance. '
+                             'Total memory used = sort_memory × processes, so ensure sufficient RAM.')
+
+    parser.add_argument("-s", '--stranded', type=str, choices=["fw", "rc", "both"], default='fw', metavar='',
+                        dest='stranded',
+                        help='''Strand-specificity of input samples.
+                             fw = map to transcript strand (default, recommended for most protocols like CLASH, CLEAR-CLIP, PARIS, SPLASH);
+                             rc = map to reverse complement of transcript strand (use if your library protocol produces reads from antisense strand);
+                             both = map on both strands (use only for unstranded libraries where strand information is not preserved).
+                             
+                             When to use:
+                             - Most RNA-RNA interactome protocols (CLASH, CLEAR-CLIP, PARIS, SPLASH) are stranded and use "fw"
+                             - Use "rc" only if you know your protocol produces reads from the reverse complement strand
+                             - Use "both" only for unstranded libraries (rare for interactome protocols)
+                             
+                             Stranded mapping filters out alignments on the wrong strand, reducing false positives and improving chimeric read detection.''')
+
+    parser.add_argument("-l1", '--seed_length1', action='store', type=int, default=12, metavar='',
+                        dest='seed_length1',
+                        help='''Seed length for 1st mapping iteration.
+                                bwa-mem parameter "-k"''')
+
+    parser.add_argument("-l2", '--seed_length2', action='store', type=int, default=16, metavar='',
+                        dest='seed_length2',
+                        help='''Seed length for 2nd mapping iteration.
+                                bwa-mem parameter "-k"''')
+
+    parser.add_argument("-s1", '--align_score1', action='store', type=int, default=18, metavar='',
+                        dest='align_score1',
+                        help='''Minimum alignment score in 1st mapping iteration.
+                                bwa-mem parameter "-T" and clan_search parameter "-l"''')
+
+    parser.add_argument("-s2", '--align_score2', action='store', type=int, default=16, metavar='',
+                        dest='align_score2',
+                        help='''Minimum alignment score in 2nd mapping iteration.
+                                It must be smaller than --align_score1 parameter.
+                                bwa-mem parameter "-T" and clan_search parameter "-l"''')
+
+    parser.add_argument("-ma1", '--match1', action='store', type=int, default=1, metavar='',
+                        dest='match1',
+                        help='Matching score for 1st mapping iteration.')
+
+    parser.add_argument("-mm1", '--mismatch1', action='store', type=int, default=4, metavar='',
+                        dest='mismatch1',
+                        help='Mismatch penalty for 1st mapping iteration.')
+
+    parser.add_argument("-ma2", '--match2', action='store', type=int, default=1, metavar='',
+                        dest='match2',
+                        help='Matching score for 2nd mapping iteration.')
+
+    parser.add_argument("-mm2", '--mismatch2', action='store', type=int, default=6, metavar='',
+                        dest='mismatch2',
+                        help='Mismatch penalty for 2nd mapping iteration.')
+
+    parser.add_argument("-go1", '--gapopen1', action='store', type=int, default=6, metavar='',
+                        dest='gapopen1',
+                        help='Gap opening penalty for 1st mapping iteration.')
+
+    parser.add_argument("-ge1", '--gapext1', action='store', type=int, default=1, metavar='',
+                        dest='gapext1',
+                        help='Gap extension penalty for 1st mapping iteration.')
+
+    parser.add_argument("-go2", '--gapopen2', action='store', type=int, default=100, metavar='',
+                        dest='gapopen2',
+                        help='Gap opening penalty for 2nd mapping iteration.')
+
+    parser.add_argument("-ge2", '--gapext2', action='store', type=int, default=100, metavar='',
+                        dest='gapext2',
+                        help='Gap extension penalty for 2nd mapping iteration.')
+
+    parser.add_argument("-h1", '--nhits1', action='store', type=int, default=50, metavar='',
+                        dest='nhits1',
+                        help='Number of allowed multi hits per read')
+
+    parser.add_argument("-h2", '--nhits2', action='store', type=int, default=100, metavar='',
+                        dest='nhits2',
+                        help='Number of allowed multi hits per read in 2nd iteration')
+
+    parser.add_argument('-co', '--chimeric_overlap', action='store', type=int, default=2, metavar='',
+                        dest='chimeric_overlap',
+                        help='Maximum number of bases allowed between the chimeric segments of a read')
+
+    parser.add_argument('--chunk_fasta', action='store', type=int, default=None, metavar='',
+                        dest='chunk_fasta',
+                        help='''Split input FASTA into N chunks for parallel processing (recommended for files >1GB).
+
+Set N to create 1-3GB chunks: N ≈ file_size_GB / desired_chunk_size_GB.
+Example: 20GB file → --chunk_fasta 10 (creates ~2GB chunks).
+
+Single-node: Process chunks in batches via --parallel_chunks (default: 2).
+Cluster: Distribute chunks via --use_batchtools.
+
+Benefits: Better I/O, lower memory per job, scalable parallelism.
+Use for: Large files (>1GB), memory constraints, I/O bottlenecks.''')
+
+    parser.add_argument('--parallel_chunks', action='store', type=int, default=2, metavar='',
+                        dest='parallel_chunks',
+                        help='''Number of chunks to process simultaneously in single-node mode (default: 2).
+
+Only used when --use_batchtools is NOT specified. For cluster mode, use --use_batchtools instead.
+
+Recommendations: Small systems (<16 cores): 1, Medium (16-32 cores): 2, Large (>32 cores): 2-4.
+Each chunk needs ~4GB memory and 4-8 CPUs. Ensure: parallel_chunks × 4-8 ≤ --processes.''')
+
+    parser.add_argument('--use_batchtools', action='store_true', dest='use_batchtools',
+                        help='''Use R batchtools to submit chunk processing jobs to LSF cluster.
+
+Requires: R with batchtools package installed, LSF scheduler, shared filesystem.
+Only effective when --chunk_fasta is specified.''')
+
+    parser.add_argument('--batchtools_queue', action='store', type=str, default='long', metavar='',
+                        dest='batchtools_queue',
+                        help='LSF queue name for batchtools jobs (default: long)')
+
+    parser.add_argument('--batchtools_cores', action='store', type=int, default=None, metavar='',
+                        dest='batchtools_cores',
+                        help='''Number of cores per batchtools LSF job (default: 8 if not specified).
+
+IMPORTANT: In batchtools mode, LSF jobs run on DIFFERENT cluster nodes, independent of the main job.
+- --processes: Applies to the MAIN job (which submits and waits), NOT to LSF jobs
+- --batchtools_cores: Directly sets cores for EACH LSF job running on cluster nodes
+
+These are COMPLETELY INDEPENDENT:
+- Main job (--processes): Just submits jobs, minimal CPU needed
+- LSF jobs (--batchtools_cores): Run BWA alignment on cluster nodes, need 8-16 cores each
+
+Example: --batchtools_cores 8 → Each LSF job gets 8 cores (regardless of --processes)
+Example: --batchtools_cores 16 → Each LSF job gets 16 cores
+
+Should match your LSF job script: #BSUB -n parameter.''')
+
+    parser.add_argument('--batchtools_memory', action='store', type=str, default=None, metavar='',
+                        dest='batchtools_memory',
+                        help='''Total memory per batchtools job (automatically converted to per-core for LSF), e.g., "16GB" (default: auto-calculated).
+
+IMPORTANT: You specify TOTAL memory, but LSF rusage[mem=...] is PER CORE.
+The code automatically converts: total_memory ÷ cores = per_core_memory.
+Example: --batchtools_cores 8 --batchtools_memory 16GB → LSF gets rusage[mem=2GB] (16GB ÷ 8 = 2GB per core).
+Auto-calculation: cores × 0.5GB total (e.g., 8 cores → 4GB total → 0.5GB per core for LSF).''')
+
+    parser.add_argument('--batchtools_walltime', action='store', type=str, default='240:00', metavar='',
+                        dest='batchtools_walltime',
+                        help='Walltime limit for batchtools jobs, e.g., "240:00" (default: 240:00).')
+
+    parser.add_argument('--batchtools_max_parallel', action='store', type=int, default=None, metavar='',
+                        dest='batchtools_max_parallel',
+                        help='''Maximum number of LSF jobs to run simultaneously (default: unlimited).
+                                If set, jobs are submitted in batches and the script waits for each batch
+                                to complete before submitting the next batch. This ensures only the specified
+                                number of jobs are running at any time.
+                                Example: --chunk_fasta 20 --batchtools_max_parallel 2 → only 2 jobs run at a time, all 20 will be processed sequentially.''')
+
+    parser.add_argument('--batchtools_template', action='store', type=str, default=None, metavar='',
+                        dest='batchtools_template',
+                        help='''Path to LSF template file for batchtools (default: lsf_custom.tmpl in ChiRA directory).
+                                The default template (lsf_custom.tmpl) is based on proven InPAS implementation.
+                                Specify a different template only if you need custom LSF directives or module loads.
+                                To use built-in "lsf-simple": set to "lsf-simple" (not recommended).''')
+
+    parser.add_argument('--batchtools_conda_env', action='store', type=str, default=None, metavar='',
+                        dest='batchtools_conda_env',
+                        help='''Conda environment for batchtools jobs (default: auto-detect from CONDA_DEFAULT_ENV).
+                                Ensures ChiRA dependencies are available on worker nodes.
+                                Example: --batchtools_conda_env chira_env''')
+
+    parser.add_argument('-v', '--version', action='version', version=f'%(prog)s {chira_utilities.__version__}')
+
+    args = parser.parse_args()
+    # Set default processes to CPU count if not specified
+    if args.processes is None:
+        args.processes = multiprocessing.cpu_count()
+    
+    return args
 
 
 def main():

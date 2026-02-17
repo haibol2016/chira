@@ -20,6 +20,9 @@ conda install -c bioconda bwa samtools bedtools
 
 # Optional: Install additional tools if needed
 conda install -c bioconda intarna gffread  # Only if using specific features
+
+# Optional: Install R and batchtools for HPC cluster processing
+conda install -c conda-forge r-base r-batchtools r-jsonlite  # Only if using --use_batchtools
 ```
 
 ### Step 3: Install ChiRA Package
@@ -91,13 +94,18 @@ If you plan to use batchtools for LSF cluster processing:
 # Activate your conda environment
 conda activate chira
 
-# Install R and batchtools
+# Install R and batchtools (recommended: via conda)
+conda install -c conda-forge r-base r-batchtools r-jsonlite
+
+# Or install R first, then packages in R:
 conda install -c conda-forge r-base
 # Then in R:
-# install.packages("batchtools")
-# Or via conda:
-conda install -c conda-forge r-batchtools
+# install.packages(c("batchtools", "jsonlite"))
 ```
+
+**Note**: `jsonlite` is required for JSON configuration file parsing. It's usually installed automatically as a dependency of `batchtools`, but explicitly installing it ensures compatibility.
+
+**Important**: All file paths are automatically converted to absolute paths for cluster job execution. No manual path conversion is needed.
 
 ## Troubleshooting
 
@@ -180,18 +188,34 @@ chira_map.py --aligner bwa \
 
 ### Important Notes for Batchtools
 
-1. **R and batchtools must be available**: The conda environment needs R and batchtools:
+1. **R and batchtools must be available**: The conda environment needs R, batchtools, and jsonlite:
    ```bash
    conda activate chira
-   conda install -c conda-forge r-base r-batchtools
+   conda install -c conda-forge r-base r-batchtools r-jsonlite
    ```
+   - `jsonlite` is required for JSON configuration file parsing
+   - Usually installed automatically as a dependency of `batchtools`
 
-2. **Conda environment path**: Use `--batchtools_conda_env` to specify the full path:
+2. **Conda environment path**: Use `--batchtools_conda_env` to specify the full path (absolute path recommended):
    ```bash
-   --batchtools_conda_env ~/miniconda3/envs/chira
+   --batchtools_conda_env /path/to/miniconda3/envs/chira
    ```
+   - Relative paths are automatically converted to absolute paths
+   - Absolute paths ensure cluster jobs can find the environment
 
-3. **Scripts location**: After `pip install -e .`, scripts are in your PATH:
+3. **Template file path**: The `--batchtools_template` parameter accepts:
+   - Absolute path to custom template file (recommended)
+   - Relative path (automatically converted to absolute)
+   - Built-in `"lsf-simple"` template (not recommended for most use cases)
+
+4. **Path handling**: All file paths are automatically converted to absolute paths:
+   - Registry directory, chunk directory, Python script paths
+   - Template file paths (if custom template is used)
+   - Chunk FASTA file paths
+   - BWA reference index paths
+   - This ensures cluster jobs can correctly resolve all paths regardless of working directory
+
+5. **Scripts location**: After `pip install -e .`, scripts are in your PATH:
    - `chira_map.py` - Direct command (recommended)
    - `python -m chira_map` - Alternative method
    - Full path not needed if installed
@@ -232,10 +256,17 @@ pip uninstall chira
 - `intarna` - RNA-RNA interaction prediction
 - `gffread` - GFF utilities
 
+### Optional R Packages (for batchtools support)
+- `batchtools` - HPC cluster job submission (required for `--use_batchtools`)
+- `jsonlite` - JSON file parsing (required for batchtools configuration)
+
 ## Notes
 
 - **Python Version**: Requires Python >= 3.6 (Python 3.9+ recommended)
 - **Conda Channel**: Use `bioconda` channel for bioinformatics tools
 - **Editable Install**: Use `pip install -e .` during development to see code changes immediately
 - **Batchtools**: Required only if using `--use_batchtools` option in `chira_map.py`
+  - Requires R with `batchtools` and `jsonlite` packages
+  - All file paths are automatically converted to absolute paths for cluster job execution
+  - See `BATCHTOOLS_USAGE.md` for detailed usage instructions
 

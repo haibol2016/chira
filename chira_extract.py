@@ -831,90 +831,6 @@ def write_interaction_summary(outdir, sample_name, compress=False, num_threads=4
     os.remove(os.path.join(outdir, "interactions.sorted"))
 
 
-def parse_arguments():
-    """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(description='Chimeric Read Annotator: extract chimeras',
-                                     usage='%(prog)s [-h] [-v,--version]',
-                                     formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-
-    parser.add_argument('-l', '--loci', action='store', dest='crl_file', required=True,
-                        metavar='', help='Input BED file with alignments')
-
-    parser.add_argument('-o', '--out', action='store', dest='outdir', required=True, metavar='',
-                        help='Path to output directory')
-
-    parser.add_argument('-g', '--gtf', action='store', dest='f_gtf', required=False,
-                        metavar='', help='Annotation GTF file')
-
-    parser.add_argument('-p', '--processes', action='store', type=int, default=1, metavar='',
-                        dest='processes',
-                        help='Number of processes to use')
-
-    parser.add_argument('-tc', '--tpm_cutoff', action='store', type=chira_utilities.score_float, default=0, metavar='',
-                        dest='tpm_cutoff',
-                        help='Transcripts with less than this percentile TPMs will be discarded in '
-                             'the final output. [0, 1) - values >= 1.0 will be clamped to just below 1.0')
-
-    parser.add_argument('-sc', '--score_cutoff', action='store', type=chira_utilities.score_float, default=0.0, metavar='',
-                        dest='score_cutoff',
-                        help='Hybrids with less than this score will be discarded in the final output. [0-1.0)')
-
-    parser.add_argument('-co', '--chimeric_overlap', action='store', type=int, default=2, metavar='',
-                        dest='chimeric_overlap',
-                        help='Maximum number of bases allowed between the chimeric segments of a read')
-
-    parser.add_argument("-r", '--hybridize', action='store_true', dest='hybridize',
-                        help="Hybridize the predicted chimeras")
-
-    parser.add_argument("-ns", '--no_seed', action='store_true', dest='no_seed',
-                        help="Do not enforce seed interactions")
-
-    parser.add_argument("-acc", '--accessibility', type=str, choices=["C", "N"], default='N', required=False,
-                        dest='accessibility', metavar='', help='IntaRNA accessibility: C (compute) or N (not)')
-
-    parser.add_argument("-m", '--intarna_mode', type=str, choices=["H", "M", "S"], default='H', required=False,
-                        dest='intarna_mode', metavar='', help='IntaRNA mode: H (heuristic), M (exact), S (seed-only)')
-
-    parser.add_argument('-t', '--temperature', action='store', type=float, default=37, metavar='',
-                        dest='temperature',
-                        help='IntaRNA temperature parameter in Celsius to setup the VRNA energy parameters')
-
-    parser.add_argument('-sbp', '--seed_bp', action='store', type=int, default=5, metavar='',
-                        dest='seed_bp', choices=range(2, 20),
-                        help='IntaRNA --seedBP parameter: number of inter-molecular base pairs within the seed region')
-
-    parser.add_argument('-smpu', '--seed_min_pu', action='store', type=chira_utilities.score_float, default=0,
-                        metavar='', dest='seed_min_pu',
-                        help='IntaRNA --seedMinPu parameter: minimal unpaired probability '
-                             '(per sequence) a seed region may have')
-
-    parser.add_argument('-accw', '--acc_width', action='store', type=int, default=150, metavar='',
-                        dest='acc_width', choices=range(0, 99999),
-                        help='IntaRNA --accW parameter:  sliding window size for accessibility computation')
-
-    parser.add_argument('-f1', '--ref_fasta1', action='store', dest='ref_fasta1', required=True,
-                        metavar='', help='First priority fasta file')
-
-    parser.add_argument('-f2', '--ref_fasta2', action='store', dest='ref_fasta2', required=False,
-                        metavar='', help='second priority fasta file')
-
-    parser.add_argument('-f', '--ref', action='store', dest='f_ref', required=False,
-                        metavar='', help='Reference fasta file')
-
-    parser.add_argument("-s", '--summarize', action='store_true', dest='summarize',
-                        help="Summarize interactions at loci level")
-
-    parser.add_argument('-n', '--sample_name', action='store', dest='sample_name', required=True,
-                        metavar='', help='Sample name prefix for output files')
-
-    parser.add_argument('-z', '--gzip', action='store_true', dest='compress',
-                        help='Compress output files (chimeras and singletons) with gzip')
-
-    parser.add_argument('-v', '--version', action='version', version=f'%(prog)s {chira_utilities.__version__}')
-
-    return parser.parse_args()
-
-
 def validate_arguments(args):
     """Validate command-line arguments."""
     if args.hybridize and args.f_gtf and not args.f_ref:
@@ -1133,6 +1049,90 @@ def merge_output_files(args, chimeras_prefix):
                                    "tpm",
                                    "alignment_score"])
     merge_files(singletons_prefix, singletons_file, header_singletons, args.processes, args.compress)
+
+
+def parse_arguments():
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(description='Chimeric Read Annotator: extract chimeras',
+                                     usage='%(prog)s [-h] [-v,--version]',
+                                     formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+
+    parser.add_argument('-l', '--loci', action='store', dest='crl_file', required=True,
+                        metavar='', help='Input BED file with alignments')
+
+    parser.add_argument('-o', '--out', action='store', dest='outdir', required=True,
+                        metavar='', help='Path to output directory')
+
+    parser.add_argument('-g', '--gtf', action='store', dest='f_gtf', required=False,
+                        metavar='', help='Annotation GTF file')
+
+    parser.add_argument('-p', '--processes', action='store', type=int, default=1, metavar='',
+                        dest='processes',
+                        help='Number of processes to use')
+
+    parser.add_argument('-tc', '--tpm_cutoff', action='store', type=chira_utilities.score_float, default=0, metavar='',
+                        dest='tpm_cutoff',
+                        help='Transcripts with less than this percentile TPMs will be discarded in '
+                             'the final output. [0, 1) - values >= 1.0 will be clamped to just below 1.0')
+
+    parser.add_argument('-sc', '--score_cutoff', action='store', type=chira_utilities.score_float, default=0.0, metavar='',
+                        dest='score_cutoff',
+                        help='Hybrids with less than this score will be discarded in the final output. [0-1.0)')
+
+    parser.add_argument('-co', '--chimeric_overlap', action='store', type=int, default=2, metavar='',
+                        dest='chimeric_overlap',
+                        help='Maximum number of bases allowed between the chimeric segments of a read')
+
+    parser.add_argument("-r", '--hybridize', action='store_true', dest='hybridize',
+                        help="Hybridize the predicted chimeras")
+
+    parser.add_argument("-ns", '--no_seed', action='store_true', dest='no_seed',
+                        help="Do not enforce seed interactions")
+
+    parser.add_argument("-acc", '--accessibility', type=str, choices=["C", "N"], default='N', required=False,
+                        dest='accessibility', metavar='', help='IntaRNA accessibility: C (compute) or N (not)')
+
+    parser.add_argument("-m", '--intarna_mode', type=str, choices=["H", "M", "S"], default='H', required=False,
+                        dest='intarna_mode', metavar='', help='IntaRNA mode: H (heuristic), M (exact), S (seed-only)')
+
+    parser.add_argument('-t', '--temperature', action='store', type=float, default=37, metavar='',
+                        dest='temperature',
+                        help='IntaRNA temperature parameter in Celsius to setup the VRNA energy parameters')
+
+    parser.add_argument('-sbp', '--seed_bp', action='store', type=int, default=5, metavar='',
+                        dest='seed_bp', choices=range(2, 20),
+                        help='IntaRNA --seedBP parameter: number of inter-molecular base pairs within the seed region')
+
+    parser.add_argument('-smpu', '--seed_min_pu', action='store', type=chira_utilities.score_float, default=0,
+                        metavar='', dest='seed_min_pu',
+                        help='IntaRNA --seedMinPu parameter: minimal unpaired probability '
+                             '(per sequence) a seed region may have')
+
+    parser.add_argument('-accw', '--acc_width', action='store', type=int, default=150, metavar='',
+                        dest='acc_width', choices=range(0, 99999),
+                        help='IntaRNA --accW parameter:  sliding window size for accessibility computation')
+
+    parser.add_argument('-f1', '--ref_fasta1', action='store', dest='ref_fasta1', required=True,
+                        metavar='', help='First priority fasta file')
+
+    parser.add_argument('-f2', '--ref_fasta2', action='store', dest='ref_fasta2', required=False,
+                        metavar='', help='second priority fasta file')
+
+    parser.add_argument('-f', '--ref', action='store', dest='f_ref', required=False,
+                        metavar='', help='Reference fasta file')
+
+    parser.add_argument("-s", '--summarize', action='store_true', dest='summarize',
+                        help="Summarize interactions at loci level")
+
+    parser.add_argument('-n', '--sample_name', action='store', dest='sample_name', required=True,
+                        metavar='', help='Sample name prefix for output files')
+
+    parser.add_argument('-z', '--gzip', action='store_true', dest='compress',
+                        help='Compress output files (chimeras and singletons) with gzip')
+
+    parser.add_argument('-v', '--version', action='version', version=f'%(prog)s {chira_utilities.__version__}')
+
+    return parser.parse_args()
 
 
 def main():

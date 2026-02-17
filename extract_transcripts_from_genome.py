@@ -107,7 +107,8 @@ def extract_transcripts_with_gffread(gtf_file, genome_fasta, output_fasta):
         return False
 
 
-if __name__ == "__main__":
+def parse_arguments():
+    """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
         description='Extract transcript FASTA sequences from a genome FASTA file using gffread',
         usage='%(prog)s [-h] [-v,--version]',
@@ -122,7 +123,12 @@ if __name__ == "__main__":
                         metavar='', help='Output transcript FASTA file')
     parser.add_argument('-v', '--version', action='version', version='%(prog)s 1.0')
     
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+def main():
+    """Main function to orchestrate the transcript extraction workflow."""
+    args = parse_arguments()
     
     success = extract_transcripts_with_gffread(
         args.gtf_file,
@@ -132,4 +138,8 @@ if __name__ == "__main__":
     
     if not success:
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
 

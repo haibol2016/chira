@@ -6,7 +6,7 @@ import os
 
 # Read version from chira_utilities.py (single source of truth)
 # The version is defined as __version__ = "X.Y.Z" in chira_utilities.py
-version = "1.4.8"  # Default fallback version
+version = "1.4.10"  # Default fallback version
 try:
     # Import chira_utilities to get the version
     import chira_utilities
@@ -131,12 +131,14 @@ setup(
     #   * Install: conda install -c bioconda gffread
     #
     # CLUSTER COMPUTING (for parallel processing on HPC clusters):
-    # - R with batchtools package
+    # - R with batchtools and jsonlite packages
     #   * Used in: chira_map.py --use_batchtools (for LSF cluster job submission)
     #   * Enables distributing chunk processing across cluster nodes via batchtools
-    #   * Install: conda install -c conda-forge r-base r-batchtools
-    #   * Or in R: install.packages("batchtools")
+    #   * Install: conda install -c conda-forge r-base r-batchtools r-jsonlite
+    #   * Or in R: install.packages(c("batchtools", "jsonlite"))
+    #   * jsonlite is required for JSON configuration file parsing
     #   * Required only if using --use_batchtools option
+    #   * All file paths are automatically converted to absolute paths for cluster job execution
     #
     # Quick installation of all required tools:
     #   conda install -c bioconda bwa samtools bedtools

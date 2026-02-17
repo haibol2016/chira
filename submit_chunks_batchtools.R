@@ -19,9 +19,38 @@ if (length(args) != 2) {
 config_file <- args[1]
 chunks_file <- args[2]
 
-# Read configuration
-config <- fromJSON(config_file)
-chunks <- fromJSON(chunks_file)
+# Verify files exist and are readable
+if (!file.exists(config_file)) {
+  stop(sprintf("ERROR: Config file does not exist: %s", config_file))
+}
+if (!file.exists(chunks_file)) {
+  stop(sprintf("ERROR: Chunks file does not exist: %s", chunks_file))
+}
+
+# Read configuration with error handling
+tryCatch({
+  config <- fromJSON(config_file)
+}, error = function(e) {
+  cat(sprintf("ERROR: Failed to parse config JSON file: %s\n", config_file))
+  cat(sprintf("Error message: %s\n", as.character(e)))
+  cat("First 500 characters of file:\n")
+  tryCatch({
+    file_content <- readLines(config_file, n = 20, warn = FALSE)
+    cat(paste(file_content, collapse = "\n"))
+    cat("\n")
+  }, error = function(e2) {
+    cat("Could not read file content\n")
+  })
+  stop(e)
+})
+
+tryCatch({
+  chunks <- fromJSON(chunks_file)
+}, error = function(e) {
+  cat(sprintf("ERROR: Failed to parse chunks JSON file: %s\n", chunks_file))
+  cat(sprintf("Error message: %s\n", as.character(e)))
+  stop(e)
+})
 
 # Extract configuration
 reg_dir <- config$reg_dir

@@ -57,7 +57,13 @@ def process_chunk_standalone(chunk_file, chunk_idx, chunk_dir,
     return chunk_bams
 
 
-if __name__ == "__main__":
+def parse_arguments():
+    """
+    Parse command-line arguments for chunk processing.
+    
+    Returns:
+        tuple: (chunk_file, chunk_idx, chunk_dir, alignment_job_types_json, per_chunk_processes)
+    """
     if len(sys.argv) != 6:
         print("Usage: process_chunk_batchtools.py <chunk_file> <chunk_idx> <chunk_dir> <alignment_job_types_json> <per_chunk_processes>", file=sys.stderr)
         sys.exit(1)
@@ -68,6 +74,13 @@ if __name__ == "__main__":
     alignment_job_types_json = sys.argv[4]
     per_chunk_processes = int(sys.argv[5])
     
+    return chunk_file, chunk_idx, chunk_dir, alignment_job_types_json, per_chunk_processes
+
+
+def main():
+    """Main function to process a single chunk."""
+    chunk_file, chunk_idx, chunk_dir, alignment_job_types_json, per_chunk_processes = parse_arguments()
+    
     try:
         process_chunk_standalone(chunk_file, chunk_idx, chunk_dir, alignment_job_types_json, per_chunk_processes)
         print(f"SUCCESS: Chunk {chunk_idx} processed", file=sys.stderr)
@@ -75,4 +88,8 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"FAILED: Chunk {chunk_idx} failed: {str(e)}", file=sys.stderr)
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
 

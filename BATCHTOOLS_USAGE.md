@@ -13,16 +13,21 @@ ChiRA supports R batchtools as a backend for submitting chunk processing jobs to
 
 ## Prerequisites
 
-1. **R installed** with `batchtools` package:
+1. **R installed** with `batchtools` and `jsonlite` packages:
    ```r
-   install.packages("batchtools")
+   install.packages(c("batchtools", "jsonlite"))
    ```
+   - `jsonlite` is usually installed automatically as a dependency of `batchtools`
 
 2. **LSF scheduler** available on your cluster
 
 3. **Shared filesystem** accessible to all compute nodes
 
 4. **Conda environment** (optional but recommended) with ChiRA dependencies
+
+5. **Absolute paths**: All file paths are automatically converted to absolute paths for cluster job execution
+   - This ensures jobs running on different cluster nodes can correctly resolve all file paths
+   - No manual path conversion needed - handled automatically by the code
 
 ## Quick Start: Running with Batchtools
 
@@ -68,6 +73,9 @@ python chira_map.py \
   - Useful if cluster has job limits per user
 - `--batchtools_conda_env`: Conda environment path (default: auto-detect from `CONDA_DEFAULT_ENV`)
 - `--batchtools_template`: LSF template file (default: `lsf_custom.tmpl` in ChiRA directory)
+  - Can be an absolute path to a custom template file
+  - Can be the built-in `"lsf-simple"` template (not recommended for most use cases)
+  - Relative paths are automatically resolved to absolute paths
   - Uses proven template based on InPAS implementation
   - Only change if you need custom LSF directives
 
@@ -122,20 +130,31 @@ python chira_map.py \
 ## How Parallel Processing Works
 
 1. **Chunk Preparation**: Python splits FASTA file into N chunks (specified by `--chunk_fasta`)
-2. **Job Submission**: Python calls R script (`submit_chunks_batchtools.R`) that uses batchtools to submit N independent LSF jobs
-3. **Parallel Execution**: Each LSF job runs on a **different cluster node**:
+2. **Path Normalization**: All file paths are automatically converted to absolute paths:
+   - Registry directory, chunk directory, Python script path
+   - Template file path (if custom template is used)
+   - Individual chunk FASTA file paths
+   - BWA reference index paths
+   - This ensures cluster jobs can correctly resolve all paths regardless of working directory
+3. **Configuration Files**: Python creates JSON configuration files with all absolute paths:
+   - `config.json`: Contains all job parameters and absolute paths
+   - `chunks.json`: Contains list of all chunks with absolute paths (one file for all chunks - this is the intended batchtools design)
+4. **Job Submission**: Python calls R script (`submit_chunks_batchtools.R`) that uses batchtools to submit N independent LSF jobs
+5. **Parallel Execution**: Each LSF job runs on a **different cluster node**:
    - Job 1 processes chunk 1 on node A
    - Job 2 processes chunk 2 on node B
    - Job 3 processes chunk 3 on node C
    - ... and so on
-4. **Resource Allocation**: Each job gets:
+6. **Resource Allocation**: Each job gets:
    - `--batchtools_cores` cores
    - `--batchtools_memory` total memory
    - Runs independently with its own resources
-5. **Result Collection**: Python monitors completion and collects BAM files from each chunk
-6. **Merging**: Python merges all chunk BAMs into final BAM files
+7. **Result Collection**: Python monitors completion and collects BAM files from each chunk
+8. **Merging**: Python merges all chunk BAMs into final BAM files
 
 **Key Point**: This is **true parallel processing** - chunks run simultaneously on different nodes, not sequentially on one node.
+
+**Important**: The `chunks.json` file contains information for **all chunks** in a single file. This is the intended design for batchtools - the `batchMap()` function reads this single file and distributes tasks to individual jobs. Each job receives its chunk information via batchtools' task system.
 
 ## Monitoring Jobs
 
@@ -163,6 +182,20 @@ reg <- loadRegistry("output_dir/batchtools_registry_<timestamp>")
 getStatus(reg)
 ```
 
+### Check Configuration Files
+
+The configuration files are created in the registry directory:
+- `config.json`: Contains all job parameters and absolute paths
+- `chunks.json`: Contains list of all chunks with absolute paths (one file for all chunks)
+
+You can inspect these files to verify paths are correct:
+```bash
+cat output_dir/batchtools_registry_<timestamp>/config.json
+cat output_dir/batchtools_registry_<timestamp>/chunks.json
+```
+
+**Note**: All paths in these files are absolute paths to ensure cluster jobs can correctly resolve files regardless of working directory.
+
 ## Advantages Over Dask
 
 1. **Simpler**: Direct LSF job submission, no worker management
@@ -180,10 +213,28 @@ Ensure R is in your PATH:
 which Rscript
 ```
 
-Install batchtools if needed:
+Install batchtools and jsonlite if needed:
 ```r
-install.packages("batchtools")
+install.packages(c("batchtools", "jsonlite"))
 ```
+
+### JSON Parsing Errors
+
+If you encounter JSON parsing errors during batchtools submission:
+
+1. **Check file encoding**: All JSON files are written with UTF-8 encoding
+2. **Check file paths**: All paths should be absolute (handled automatically)
+3. **Check file content**: Inspect the JSON files in the registry directory:
+   ```bash
+   cat output_dir/batchtools_registry_<timestamp>/config.json
+   cat output_dir/batchtools_registry_<timestamp>/chunks.json
+   ```
+4. **Check R error messages**: The R script provides detailed error messages with file content previews if JSON parsing fails
+
+Common causes:
+- Invalid characters in file paths (should be handled automatically by path normalization)
+- File system issues (permissions, disk space)
+- Corrupted JSON files (check file integrity)
 
 ### Jobs Not Starting
 
@@ -198,15 +249,17 @@ Check job requirements match your LSF configuration:
 
 ### Conda Environment Not Found
 
-Specify conda environment explicitly:
+Specify conda environment explicitly (use absolute path):
 ```bash
---batchtools_conda_env chira_env
+--batchtools_conda_env /path/to/miniconda3/envs/chira
 ```
 
 Or ensure `CONDA_DEFAULT_ENV` is set:
 ```bash
 export CONDA_DEFAULT_ENV=chira_env
 ```
+
+**Note**: The conda environment path is automatically converted to an absolute path if a relative path is provided.
 
 ### nodename Parameter
 
@@ -245,9 +298,18 @@ nodename = "your-lsf-hostname"
 - Host spanning (`#BSUB -R "span[hosts=1]"`)
 - Threading environment variables (OMP_NUM_THREADS, etc.)
 
+**Template Path Handling:**
+- **Relative paths**: Automatically resolved to absolute paths
+- **Absolute paths**: Used as-is
+- **Built-in template**: Use `"lsf-simple"` to use batchtools' built-in simple LSF template (not recommended for most use cases)
+
 **To use a different template:**
 ```bash
+# Absolute path (recommended)
 --batchtools_template /path/to/your/custom.tmpl
+
+# Relative path (automatically converted to absolute)
+--batchtools_template ./my_custom.tmpl
 ```
 
 **To use built-in "lsf-simple" (not recommended):**
@@ -260,12 +322,19 @@ nodename = "your-lsf-hostname"
 - You need additional custom LSF directives
 - Your cluster has non-standard LSF configuration
 
+**Important**: Template file paths are automatically converted to absolute paths to ensure cluster jobs can find the template file regardless of working directory.
+
 See `lsf_custom.tmpl` for the default template structure.
 
 ## Files Created
 
-- `process_chunk_batchtools.py`: Standalone script for processing one chunk
+- `process_chunk_batchtools.py`: Standalone script for processing one chunk (called by each batchtools job)
 - `submit_chunks_batchtools.R`: R script that submits jobs via batchtools
-- `lsf_custom.tmpl`: Example custom template (only needed if built-in doesn't work)
-- `output_dir/batchtools_registry_<timestamp>/`: Batchtools registry directory
+- `lsf_custom.tmpl`: Default LSF template file (included with ChiRA)
+- `output_dir/batchtools_registry_<timestamp>/`: Batchtools registry directory containing:
+  - `config.json`: Job configuration with all absolute paths
+  - `chunks.json`: List of all chunks with absolute paths (one file for all chunks - intended design)
+  - Other batchtools registry files (jobs, logs, etc.)
+
+**Path Handling**: All file paths in configuration files are absolute paths to ensure cluster jobs can correctly resolve files regardless of working directory.
 

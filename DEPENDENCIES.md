@@ -102,6 +102,26 @@ The following command-line tools must be installed and available in the system P
    - Used in: `chira_merge.py`
    - Purpose: Moving/renaming files (used via `os.system()`)
 
+### HPC Cluster Tools
+
+10. **R with batchtools package**
+    - Used in: `chira_map.py` (optional, for HPC cluster job submission)
+    - R script: `submit_chunks_batchtools.R`
+    - Purpose: Submitting chunk-based batch jobs to HPC cluster schedulers (LSF, SLURM, etc.)
+    - Note: Only required when using `--use_batchtools` option in `chira_map.py`
+    - Installation: Install R and the batchtools package:
+      ```r
+      install.packages("batchtools")
+      ```
+    - Dependencies: Requires `jsonlite` R package (usually installed automatically with batchtools)
+
+11. **LSF (Load Sharing Facility) cluster scheduler**
+    - Used in: `chira_map.py` (optional, for HPC cluster job submission)
+    - Commands: `bsub`, `bjobs`, `bqueues`
+    - Purpose: Job submission and management on LSF-managed HPC clusters
+    - Note: Only required when using `--use_batchtools` option with LSF template in `chira_map.py`
+    - Alternative: Other cluster schedulers (SLURM, SGE, etc.) can be used with appropriate batchtools templates
+
 ## Installation Recommendations
 
 ### Python Packages
@@ -141,6 +161,23 @@ conda install -c bioconda bwa samtools bedtools intarna
 
 For CLAN and blockbuster, please refer to their respective documentation for installation instructions.
 
+**R with batchtools** (for HPC cluster job submission):
+- Install R from [CRAN](https://cran.r-project.org/) or via conda:
+  ```bash
+  conda install -c conda-forge r-base
+  ```
+- Install batchtools and jsonlite R packages:
+  ```r
+  R
+  > install.packages(c("batchtools", "jsonlite"))
+  ```
+- Or via conda:
+  ```bash
+  conda install -c conda-forge r-batchtools r-jsonlite
+  ```
+- **LSF cluster scheduler**: Usually pre-installed on HPC clusters. Contact your cluster administrator for access and queue information.
+- **Note**: When using batchtools, ensure all file paths are absolute paths (this is handled automatically by the code). The batchtools template file path should also be absolute or use the built-in "lsf-simple" template.
+
 ## Parallel Computing Support
 
 ChiRA scripts support parallel processing to improve performance on multi-core systems:
@@ -177,6 +214,15 @@ ChiRA scripts support parallel processing to improve performance on multi-core s
    - Also uses parallel sort (GNU sort `--parallel`) for merging and interaction summary
    - Benefit: Linear speedup with number of processes (up to available cores)
 
+5. **chira_map.py (HPC Cluster Submission)**
+   - Uses R batchtools package for submitting chunk-based batch jobs to HPC cluster schedulers
+   - Command-line option: `--use_batchtools` (requires additional batchtools parameters)
+   - Parallelizes: FASTA chunk processing by submitting each chunk as a separate cluster job
+   - Cluster schedulers supported: LSF (default), SLURM, SGE, etc. (via batchtools templates)
+   - Benefit: Scales to hundreds of chunks on HPC clusters, better resource management, automatic job queuing
+   - Requirements: R with batchtools package, cluster scheduler (LSF, SLURM, etc.), batchtools template file
+   - Note: All file paths are automatically converted to absolute paths for cluster job execution
+
 ### Performance Recommendations
 
 - **For large datasets**: Use `-t 0` or `-p 0` (where applicable) to automatically use all available CPU cores
@@ -184,13 +230,14 @@ ChiRA scripts support parallel processing to improve performance on multi-core s
 - **For BAM sorting**: Install `psutil` for automatic memory optimization, or use `--sort_memory` to specify memory per thread manually
 - **For I/O optimization**: Install `psutil` to enable adaptive buffer sizing (8-16MB) which provides 10-50x I/O performance improvement
 - **For very large FASTA files**: Use `--chunk_fasta` in `chira_map.py` to split input into chunks for better I/O and memory efficiency
+- **For HPC clusters**: Use `--use_batchtools` in `chira_map.py` to submit chunk jobs to cluster schedulers (LSF, SLURM, etc.) for better scalability and resource management
 
 ## Script-Specific Dependencies
 
 ### Core ChiRA Scripts
 
 - **chira_collapse.py**: No external dependencies (uses standard library only)
-- **chira_map.py**: Requires `pysam`, `bwa`, `samtools` (CLAN optional, `psutil` optional for memory optimization and I/O bottleneck detection)
+- **chira_map.py**: Requires `pysam`, `bwa`, `samtools` (CLAN optional, `psutil` optional for memory optimization and I/O bottleneck detection, R with batchtools optional for HPC cluster submission)
 - **chira_merge.py**: Requires `bcbiogff`, `BEDTools` (blockbuster optional)
 - **chira_extract.py**: Requires `biopython`, `bcbiogff`, `BEDTools` (IntaRNA optional)
 - **chira_quantify.py**: No external dependencies (uses standard library only)
@@ -204,6 +251,8 @@ ChiRA scripts support parallel processing to improve performance on multi-core s
 - **remove_mirna_hairpin_from_gtf.py**: No external dependencies (uses standard library only)
 - **remove_mirna_hairpin_from_fasta.py**: Requires `biopython`
 - **concatenate_gtf.py**: No external dependencies (uses standard library only)
+- **process_chunk_batchtools.py**: No external dependencies (uses standard library only, called by batchtools jobs)
+- **submit_chunks_batchtools.R**: Requires R with `batchtools` and `jsonlite` packages (used by `chira_map.py` for HPC cluster submission)
 
 ## Notes
 
@@ -212,13 +261,15 @@ ChiRA scripts support parallel processing to improve performance on multi-core s
   - **blockbuster.x**: Only needed if using block-based merging method
   - **IntaRNA**: Only needed if using the `--hybridize` option in `chira_extract.py`
   - **pyliftover**: Only needed if using coordinate liftover in `download_mirbase_gff3.py`
+  - **R with batchtools**: Only needed if using `--use_batchtools` option in `chira_map.py` for HPC cluster job submission
+  - **LSF cluster scheduler**: Only needed if using batchtools with LSF template (other schedulers like SLURM, SGE can be used with appropriate templates)
   - **psutil**: Optional but highly recommended for:
     - Automatic memory optimization in `chira_map.py` (BAM sorting)
     - I/O bottleneck detection in `chira_map.py` (when using `--chunk_fasta`)
     - Adaptive buffer sizing in `chira_utilities.py` (10-50x I/O performance improvement)
 
 - Standard library modules used (no installation needed):
-  - `argparse`, `os`, `sys`, `collections`, `multiprocessing`, `itertools`, `datetime`, `subprocess`, `math`, `re`, `copy`, `gzip`, `shutil`, `ftplib`, `urllib`, `tempfile`, `time`, `concurrent.futures` (for ThreadPoolExecutor and ProcessPoolExecutor)
+  - `argparse`, `os`, `sys`, `collections`, `multiprocessing`, `itertools`, `datetime`, `subprocess`, `math`, `re`, `copy`, `gzip`, `shutil`, `ftplib`, `urllib`, `tempfile`, `time`, `json`, `concurrent.futures` (for ThreadPoolExecutor and ProcessPoolExecutor)
 
 - Parallel computing features:
   - All parallel computing features are backward compatible (default to single-threaded/process)

@@ -528,8 +528,75 @@ def quantify_crls(crl_file, em_threshold, num_processes=1):
     return d_alpha, d_crl_tpm
 
 
-if __name__ == "__main__":
+def print_configuration(args):
+    """Print configuration summary."""
+    print('Input BED file                       : ' + args.bed)
+    print('Input merged BED file                : ' + args.merged_bed)
+    print('Output directory                     : ' + args.outdir)
+    print('Minimum locus size                   : ' + str(args.min_locus_size))
+    print('CRL share                            : ' + str(args.crl_share))
+    print('EM threshold                         : ' + str(args.em_thresh))
+    print('Number of processes                  : ' + str(args.num_processes if args.num_processes > 0 else 'all available'))
+    print('Create CRLs too                      : ' + str(args.build_crls_too))
+    print("===================================================================")
 
+
+def write_crl_output(loci_file, output_file, d_read_crl_fractions, d_crl_tpms):
+    """
+    Write CRL output file with fractions and TPMs.
+    
+    Args:
+        loci_file: Path to input loci file
+        output_file: Path to output file
+        d_read_crl_fractions: Dictionary mapping read_id -> {crl_id: fraction}
+        d_crl_tpms: Dictionary mapping crl_id -> TPM value
+    """
+    # Re-read file to write output (OS will cache it, so second read is fast)
+    # OPTIMIZATION: Use larger buffer size (1MB) for write operations in loops
+    # This significantly reduces system calls and improves I/O performance when writing many small lines
+    with open(loci_file, "r", buffering=1024*1024) as fh_in:
+        with open(output_file, "w", buffering=1024*1024) as fh_out:
+            for l in fh_in:
+                k = l.rstrip("\n").split("\t")
+                # Defensive check: skip malformed lines
+                if len(k) < 4:
+                    print(f"Warning: Skipping malformed line in loci file (expected at least 4 fields, got {len(k)}): {l[:100]}", file=sys.stderr)
+                    continue
+                read_id = k[0]
+                crl_id = k[3]
+                # Defensive check: skip if read_id or crl_id not in dictionaries
+                if read_id not in d_read_crl_fractions or crl_id not in d_read_crl_fractions[read_id]:
+                    print(f"Warning: Skipping line with missing read_id or crl_id in fractions: read_id={read_id}, crl_id={crl_id}", file=sys.stderr)
+                    continue
+                if crl_id not in d_crl_tpms:
+                    print(f"Warning: Skipping line with missing crl_id in TPMs: crl_id={crl_id}", file=sys.stderr)
+                    continue
+                # Format values and use join for efficient string construction
+                fraction_str = "{:.2f}".format(d_read_crl_fractions[read_id][crl_id])
+                tpm_str = "{:.4g}".format(d_crl_tpms[crl_id])
+                fh_out.write("\t".join([l.rstrip("\n"), fraction_str, tpm_str]) + "\n")
+
+
+def finalize_output(outdir, temp_file, final_file):
+    """
+    Remove temporary files and sort the final output file.
+    
+    Args:
+        outdir: Output directory
+        temp_file: Temporary file to remove
+        final_file: Final output file to create (sorted)
+    """
+    temp_path = os.path.join(outdir, temp_file)
+    final_path = os.path.join(outdir, final_file)
+    
+    chira_utilities.print_w_time("START: Sort CRLs file by read name")
+    os.system("sort -V " + temp_path + " > " + final_path)
+    os.remove(temp_path)
+    chira_utilities.print_w_time("END: Sort CRLs file by read name")
+
+
+def parse_arguments():
+    """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description='Chimeric Read Annotator: quantify mapped loci',
                                      usage='%(prog)s [-h] [-v,--version]',
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -572,53 +639,36 @@ if __name__ == "__main__":
 
     parser.add_argument('-v', '--version', action='version', version=f'%(prog)s {chira_utilities.__version__}')
 
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    print('Input BED file                       : ' + args.bed)
-    print('Input merged BED file                : ' + args.merged_bed)
-    print('Output directory                     : ' + args.outdir)
-    print('Minimum locus size                   : ' + str(args.min_locus_size))
-    print('CRL share                            : ' + str(args.crl_share))
-    print('EM threshold                         : ' + str(args.em_thresh))
-    print('Number of processes                  : ' + str(args.num_processes if args.num_processes > 0 else 'all available'))
-    print('Create CRLs too                      : ' + str(args.build_crls_too))
-    print("===================================================================")
 
+def main():
+    """Main function to orchestrate the CRL quantification workflow."""
+    args = parse_arguments()
+    print_configuration(args)
+
+    # Build CRLs
+    loci_file = os.path.join(args.outdir, 'loci.txt')
     chira_utilities.print_w_time("START: Build CRLs")
     build_crls(args.build_crls_too, args.bed, args.merged_bed,
-               os.path.join(args.outdir, 'loci.txt'), args.crl_share, args.min_locus_size)
+               loci_file, args.crl_share, args.min_locus_size)
     chira_utilities.print_w_time("END: Build CRLs")
+    
+    # Quantify CRLs
     chira_utilities.print_w_time("START: Quantify CRLs")
-    d_read_crl_fractions, d_crl_tpms = quantify_crls(os.path.join(args.outdir, 'loci.txt'), args.em_thresh, args.num_processes)
+    d_read_crl_fractions, d_crl_tpms = quantify_crls(loci_file, args.em_thresh, args.num_processes)
     chira_utilities.print_w_time("END: Quantify CRLs")
+    
+    # Write output
+    temp_output_file = os.path.join(args.outdir, 'loci.counts.temp')
     chira_utilities.print_w_time("START: Write CRLs")
-    # Re-read file to write output (OS will cache it, so second read is fast)
-    # OPTIMIZATION: Use larger buffer size (1MB) for write operations in loops
-    # This significantly reduces system calls and improves I/O performance when writing many small lines
-    with open(os.path.join(args.outdir, 'loci.txt'), "r", buffering=1024*1024) as fh_in:
-        with open(os.path.join(args.outdir, 'loci.counts.temp'), "w", buffering=1024*1024) as fh_out:
-            for l in fh_in:
-                k = l.rstrip("\n").split("\t")
-                # Defensive check: skip malformed lines
-                if len(k) < 4:
-                    print(f"Warning: Skipping malformed line in loci file (expected at least 4 fields, got {len(k)}): {l[:100]}", file=sys.stderr)
-                    continue
-                read_id = k[0]
-                crl_id = k[3]
-                # Defensive check: skip if read_id or crl_id not in dictionaries
-                if read_id not in d_read_crl_fractions or crl_id not in d_read_crl_fractions[read_id]:
-                    print(f"Warning: Skipping line with missing read_id or crl_id in fractions: read_id={read_id}, crl_id={crl_id}", file=sys.stderr)
-                    continue
-                if crl_id not in d_crl_tpms:
-                    print(f"Warning: Skipping line with missing crl_id in TPMs: crl_id={crl_id}", file=sys.stderr)
-                    continue
-                # Format values and use join for efficient string construction
-                fraction_str = "{:.2f}".format(d_read_crl_fractions[read_id][crl_id])
-                tpm_str = "{:.4g}".format(d_crl_tpms[crl_id])
-                fh_out.write("\t".join([l.rstrip("\n"), fraction_str, tpm_str]) + "\n")
+    write_crl_output(loci_file, temp_output_file, d_read_crl_fractions, d_crl_tpms)
     chira_utilities.print_w_time("END: Write CRLs")
-    os.remove(os.path.join(args.outdir, 'loci.txt'))
-    chira_utilities.print_w_time("START: Sort CRLs file by read name")
-    os.system("sort -V " + os.path.join(args.outdir, 'loci.counts.temp') + " > " + os.path.join(args.outdir, 'loci.counts'))
-    os.remove(os.path.join(args.outdir, 'loci.counts.temp'))
-    chira_utilities.print_w_time("END: Sort CRLs file by read name")
+    
+    # Cleanup and finalize
+    os.remove(loci_file)
+    finalize_output(args.outdir, 'loci.counts.temp', 'loci.counts')
+
+
+if __name__ == "__main__":
+    main()

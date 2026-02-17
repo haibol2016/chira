@@ -950,8 +950,107 @@ def transcript_to_genomic_pos(transcriptomic_bed, genomic_bed, f_geneexonbed, f_
     return
 
 
-if __name__ == "__main__":
+def print_configuration(args):
+    """Print configuration summary."""
+    print('Input BED file                       : ' + args.bed)
+    print('Output directory                     : ' + args.outdir)
+    print('Segment overlap fraction             : ' + str(args.segment_overlap_fraction))
+    print('Alignment/Block overlap fraction     : ' + str(args.alignment_overlap_fraction))
+    if args.gtf:
+        print('Annotation file                      : ' + args.gtf)
+    if args.block_based:
+        print('Merge method                         : blockbuster based')
+        print('Blockbuster distance                 : ' + str(args.distance))
+        print('Blockbuster minClusterHeight         : ' + str(args.min_cluster_height))
+        print('Blockbuster minBlockHeight           : ' + str(args.min_block_height))
+        print('Blockbuster scale                    : ' + str(args.scale))
+    else:
+        print('Merge method                         : overlap based')
+        print('Minimum locus size                   : ' + str(args.min_locus_size))
+    print('Minimum alignment length as % of longest : ' + str(args.length_threshold))
+    print('Chimeric overlap                     : ' + str(args.chimeric_overlap))
+    if args.num_processes is not None:
+        print('Number of parallel processes          : ' + str(args.num_processes))
+    else:
+        print('Number of parallel processes          : auto (CPU count)')
+    if args.ref_fasta1:
+        print('1st priority reference fasta file    : ' + args.ref_fasta1)
+    if args.ref_fasta2:
+        print('2nd priority reference fasta file    : ' + args.ref_fasta2)
+    print("===================================================================")
 
+
+def setup_references(args):
+    """
+    Extract reference lengths from FASTA files.
+    
+    Args:
+        args: Parsed arguments containing ref_fasta1 and ref_fasta2
+    
+    Returns:
+        tuple: (d_reflen1, d_reflen2) dictionaries mapping reference IDs to lengths
+    """
+    d_reflen1 = defaultdict()
+    d_reflen2 = defaultdict()
+    if args.ref_fasta1:
+        chira_utilities.extract_reflengths(args.ref_fasta1, d_reflen1)
+    if args.ref_fasta2:
+        chira_utilities.extract_reflengths(args.ref_fasta2, d_reflen2)
+    return d_reflen1, d_reflen2
+
+
+def process_segments(args, d_reflen1, d_reflen2):
+    """
+    Convert reads to segments and handle coordinate conversion if GTF is provided.
+    
+    Args:
+        args: Parsed arguments
+        d_reflen1: Dictionary of reference lengths for first priority reference
+        d_reflen2: Dictionary of reference lengths for second priority reference
+    """
+    chira_utilities.print_w_time("START: Reads to segments")
+    reads_to_segments(args.bed, args.outdir, args.segment_overlap_fraction, args.chimeric_overlap,
+                      d_reflen1.keys(), d_reflen2.keys(), args.chimeric_only, args.length_threshold)
+    chira_utilities.print_w_time("END: Reads to segments")
+    
+    # Handle coordinate conversion if GTF annotation is provided
+    if args.gtf:
+        # Parse the annotations and save them to dictionaries. Additionally write exons bed files to the outdir
+        chira_utilities.print_w_time("START: Parse the annotation file")
+        parse_annotations(args.gtf, args.outdir)
+        chira_utilities.print_w_time("END: Parse the annotation file")
+        chira_utilities.print_w_time("START: Convert to genomic coordinates")
+        transcript_to_genomic_pos(os.path.join(args.outdir, "segments.temp.bed"),
+                                  os.path.join(args.outdir, "segments.bed"),
+                                  os.path.join(args.outdir, "genomic_exons.bed"),
+                                  os.path.join(args.outdir, "transcriptomic_exons.bed"))
+        chira_utilities.print_w_time("END: Convert to genomic coordinates")
+        os.remove(os.path.join(args.outdir, "segments.temp.bed"))
+    else:
+        os.system(" ".join(["mv", os.path.join(args.outdir, "segments.temp.bed"),
+                            os.path.join(args.outdir, "segments.bed")]))
+
+
+def merge_loci(args):
+    """
+    Merge loci using either blockbuster-based or overlap-based method.
+    
+    Args:
+        args: Parsed arguments containing merge method and parameters
+    """
+    if args.block_based:
+        chira_utilities.print_w_time("START: blockbuster based merging")
+        merge_loci_blockbuster(args.outdir, args.distance, args.min_cluster_height, args.min_block_height,
+                               args.scale, args.alignment_overlap_fraction, args.num_processes)
+        chira_utilities.print_w_time("END: blockbuster based merging")
+    else:
+        chira_utilities.print_w_time("START: overlap based merging")
+        merge_loci_overlap(args.outdir, args.alignment_overlap_fraction, args.min_locus_size, args.num_processes)
+        chira_utilities.print_w_time("END: overlap based merging")
+
+
+def parse_arguments():
+    """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description='Chimeric Read Annotator: merge alignments and convert coordinates',
                                      usage='%(prog)s [-h] [-v,--version]',
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -1021,68 +1120,24 @@ Set to 1 to disable parallel processing.''')
 
     parser.add_argument('-v', '--version', action='version', version=f'%(prog)s {chira_utilities.__version__}')
 
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    print('Input BED file                       : ' + args.bed)
-    print('Output directory                     : ' + args.outdir)
-    print('Segment overlap fraction             : ' + str(args.segment_overlap_fraction))
-    print('Alignment/Block overlap fraction     : ' + str(args.alignment_overlap_fraction))
-    if args.gtf:
-        print('Annotation file                      : ' + args.gtf)
-    if args.block_based:
-        print('Merge method                         : blockbuster based')
-        print('Blockbuster distance                 : ' + str(args.distance))
-        print('Blockbuster minClusterHeight         : ' + str(args.min_cluster_height))
-        print('Blockbuster minBlockHeight           : ' + str(args.min_block_height))
-        print('Blockbuster scale                    : ' + str(args.scale))
-    else:
-        print('Merge method                         : overlap based')
-        print('Minimum locus size                   : ' + str(args.min_locus_size))
-    print('Minimum alignment length as % of longest : ' + str(args.length_threshold))
-    print('Chimeric overlap                     : ' + str(args.chimeric_overlap))
-    if args.num_processes is not None:
-        print('Number of parallel processes          : ' + str(args.num_processes))
-    else:
-        print('Number of parallel processes          : auto (CPU count)')
-    if args.ref_fasta1:
-        print('1st priority reference fasta file    : ' + args.ref_fasta1)
-    if args.ref_fasta2:
-        print('2nd priority reference fasta file    : ' + args.ref_fasta2)
-    print("===================================================================")
 
-    d_reflen1 = defaultdict()
-    d_reflen2 = defaultdict()
-    if args.ref_fasta1 and args.ref_fasta2:
-        chira_utilities.extract_reflengths(args.ref_fasta1, d_reflen1)
-        if args.ref_fasta2:
-            chira_utilities.extract_reflengths(args.ref_fasta2, d_reflen2)
+def main():
+    """Main function to orchestrate the merging workflow."""
+    args = parse_arguments()
+    print_configuration(args)
 
-    chira_utilities.print_w_time("START: Reads to segments")
-    reads_to_segments(args.bed, args.outdir, args.segment_overlap_fraction, args.chimeric_overlap,
-                      d_reflen1.keys(), d_reflen2.keys(), args.chimeric_only, args.length_threshold)
-    chira_utilities.print_w_time("END: Reads to segments")
-    if args.gtf:
-        # Parse the annotations and save them to dictionaries. Additionally write exons bed files to the outdir
-        chira_utilities.print_w_time("START: Parse the annotation file")
-        parse_annotations(args.gtf, args.outdir)
-        chira_utilities.print_w_time("END: Parse the annotation file")
-        chira_utilities.print_w_time("START: Convert to genomic coordinates")
-        transcript_to_genomic_pos(os.path.join(args.outdir, "segments.temp.bed"),
-                                  os.path.join(args.outdir, "segments.bed"),
-                                  os.path.join(args.outdir, "genomic_exons.bed"),
-                                  os.path.join(args.outdir, "transcriptomic_exons.bed"))
-        chira_utilities.print_w_time("END: Convert to genomic coordinates")
-        os.remove(os.path.join(args.outdir, "segments.temp.bed"))
-    else:
-        os.system(" ".join(["mv", os.path.join(args.outdir, "segments.temp.bed"),
-                            os.path.join(args.outdir, "segments.bed")]))
-    if args.block_based:
-        chira_utilities.print_w_time("START: blockbuster based merging")
-        merge_loci_blockbuster(args.outdir, args.distance, args.min_cluster_height, args.min_block_height,
-                               args.scale, args.alignment_overlap_fraction, args.num_processes)
-        chira_utilities.print_w_time("END: blockbuster based merging")
-    else:
-        chira_utilities.print_w_time("START: overlap based merging")
-        merge_loci_overlap(args.outdir, args.alignment_overlap_fraction, args.min_locus_size, args.num_processes)
-        chira_utilities.print_w_time("END: overlap based merging")
+    # Setup reference lengths
+    d_reflen1, d_reflen2 = setup_references(args)
+
+    # Process segments (reads to segments, coordinate conversion if GTF provided)
+    process_segments(args, d_reflen1, d_reflen2)
+
+    # Merge loci using selected method
+    merge_loci(args)
+
+
+if __name__ == "__main__":
+    main()
 

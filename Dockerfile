@@ -36,6 +36,9 @@ RUN apt-get update && \
         bedtools \
         gffread \
         intarna \
+        r-base \
+        r-batchtools \
+        r-jsonlite \
         && \
     micromamba clean -afy && \
     # Create symlinks for ALL conda binaries in /usr/local/bin so they're always in PATH
@@ -61,7 +64,8 @@ ENV HOME=/home/chira
 ENV TMPDIR=/tmp
 
 # Copy the ChiRA codebase and set permissions
-COPY --chown=chira:chira *.py LICENSE ./
+# Include Python scripts, R scripts, and template files for batchtools support
+COPY --chown=chira:chira *.py *.R *.tmpl LICENSE ./
 
 # Generate entrypoint script inline (makes Dockerfile self-contained)
 RUN cat > /usr/local/bin/docker-entrypoint.sh << 'EOF'
@@ -97,6 +101,9 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh && \
     # Make Python scripts executable and copy to /usr/local/bin so they're always in PATH
     chmod +x *.py && \
     cp *.py /usr/local/bin/ && \
+    # Copy R scripts and template files to /usr/local/bin for batchtools support
+    # R scripts don't need to be executable, but copying ensures they're accessible
+    cp *.R *.tmpl /usr/local/bin/ 2>/dev/null || true && \
     chown -R chira:chira /app
 
 # Switch to non-root user

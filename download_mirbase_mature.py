@@ -132,7 +132,24 @@ def extract_species_mirnas(input_file, output_file, species_code):
         sys.exit(1)
 
 
-def main():
+def cleanup_temp_file(temp_file, keep_file):
+    """
+    Remove temporary file if not keeping it.
+    
+    Args:
+        temp_file: Path to temporary file
+        keep_file: If True, keep the file; if False, remove it
+    """
+    if not keep_file:
+        try:
+            os.remove(temp_file)
+            print(f"Removed temporary file: {temp_file}")
+        except Exception as e:
+            print(f"Warning: Could not remove temporary file: {e}", file=sys.stderr)
+
+
+def parse_arguments():
+    """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
         description='Download species-specific mature miRNA sequences from miRBase',
         usage='%(prog)s [-h] [-v,--version]',
@@ -151,7 +168,12 @@ def main():
                         metavar='', help='Download timeout in seconds (default: 30)')
     parser.add_argument('-v', '--version', action='version', version='%(prog)s 1.0')
     
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+def main():
+    """Main function to orchestrate the miRBase mature miRNA download workflow."""
+    args = parse_arguments()
     
     temp_file = 'mature.fa'
     
@@ -168,12 +190,7 @@ def main():
     print(f"Extracted {sequence_count} mature miRNA sequences for {args.species_code}")
     print(f"Output written to: {args.output_file}")
     
-    if not args.keep_full:
-        try:
-            os.remove(temp_file)
-            print(f"Removed temporary file: {temp_file}")
-        except Exception as e:
-            print(f"Warning: Could not remove temporary file: {e}", file=sys.stderr)
+    cleanup_temp_file(temp_file, args.keep_full)
 
 
 if __name__ == "__main__":
