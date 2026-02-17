@@ -12,7 +12,7 @@ from Bio import SeqIO
 from datetime import datetime
 
 # Version number - single source of truth for all ChiRA scripts
-__version__ = "1.4.10"
+__version__ = "1.4.11"
 
 # Try to import psutil for adaptive buffer sizing (optional dependency)
 try:

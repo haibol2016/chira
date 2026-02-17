@@ -6,7 +6,7 @@ import os
 
 # Read version from chira_utilities.py (single source of truth)
 # The version is defined as __version__ = "X.Y.Z" in chira_utilities.py
-version = "1.4.10"  # Default fallback version
+version = "1.4.11"  # Default fallback version
 try:
     # Import chira_utilities to get the version
     import chira_utilities
@@ -69,6 +69,10 @@ setup(
         "biopython",      # For FASTA/sequence parsing (chira_extract.py, chira_utilities.py)
         "bcbio-gff",      # For GFF/GTF annotation file parsing (chira_extract.py, chira_merge.py)
         "pysam",          # For BAM file manipulation (chira_map.py: merging, sorting BAM files)
+        "mpire",          # For enhanced multiprocessing performance (chira_quantify.py, chira_extract.py)
+                          # - Provides shared objects, lower overhead, and better performance than ProcessPoolExecutor/Process
+                          # - Benefits: 50-90% memory reduction, 2-3x faster startup, better performance
+                          # - Required for parallel processing in chira_quantify.py and chira_extract.py
     ],
     extras_require={
         "optional": [
@@ -77,11 +81,6 @@ setup(
                               # - chira_map.py: Automatic memory allocation for BAM sorting, I/O bottleneck detection
                               # - chira_utilities.py: Adaptive buffer sizing (8-16MB) for 10-50x I/O performance improvement
                               # Install with: pip install psutil
-            "mpire",           # For enhanced multiprocessing performance in chira_quantify.py
-                              # - Provides shared objects, lower overhead, and better performance than ProcessPoolExecutor
-                              # - Benefits: 50-90% memory reduction, 2-3x faster startup, better performance
-                              # - If not available, falls back to ProcessPoolExecutor (slower, more memory overhead)
-                              # - Install with: pip install mpire
             "requests",        # For download_ensembl.py (downloading Ensembl files via HTTP/HTTPS)
             "pyliftover",      # For download_mirbase_gff3.py coordinate liftover (converting coordinates between genome versions)
         ],

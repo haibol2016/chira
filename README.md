@@ -1,13 +1,14 @@
 # ChiRA - Chimeric Read Analyzer
 
-**Version**: 1.4.10 (Modified with performance optimizations and parallel computing support)
+**Version**: 1.4.11 (Modified with performance optimizations and parallel computing support)
 
 ChiRA is a set of tools to analyze RNA-RNA interactome experimental data such as CLASH, CLEAR-CLIP, PARIS, SPLASH etc. Following are the descriptions of the each tool. Here we provide descriptions about the input and ouptput files. For the detailed description of the other parameters please look at the help texts of tools.
 
 **Note**: This is a modified version of ChiRA (based on v1.4.3) with significant performance optimizations and new features. The original code is licensed under GPL v3, and this modified version maintains the same license. All changes are documented in the "Recent Improvements" section below and in [CHANGELOG.md](CHANGELOG.md).
 
 ## Version History
-- **v1.4.10** (Current, 2026-02-15): Fixed batchtools submission issues (template path handling, JSON parsing), ensured all paths are absolute for cluster jobs, and refactored scripts for better code organization
+- **v1.4.11** (Current, 2026-02-15): MPIRE made required dependency for optimal multiprocessing performance, removed fallback code, improved memory efficiency (50-90% reduction) and startup time (2-3x faster)
+- **v1.4.10** (2026-02-15): Fixed batchtools submission issues (template path handling, JSON parsing), ensured all paths are absolute for cluster jobs, and refactored scripts for better code organization
 - **v1.4.9** (2026-02-15): Added `--parallel_chunks` parameter for configurable chunk parallelism in chira_map.py
 - **v1.4.8** (2026-02-15): Improved chunk-based parallelization for very large transcript counts (e.g., human genome with 387K+ transcripts), variable naming consistency improvements, and bug fixes in chira_merge.py
 - **v1.4.7** (2026-02-15): New utility scripts (extract_transcripts_from_genome.py), U→T conversion in download_mirbase_mature.py, gffread support, and removal of deprecated scripts
@@ -39,8 +40,11 @@ See [CHANGELOG.md](CHANGELOG.md) for detailed change history.
 ### v1.4.6 (2026-02-15) - Multiprocessing & I/O Optimizations
 
 **Multiprocessing Improvements:**
-- **chira_quantify.py**: Changed from `ThreadPoolExecutor` to `ProcessPoolExecutor` for EM algorithm (2-8x faster, bypasses Python GIL)
+- **chira_quantify.py**: Changed from `ThreadPoolExecutor` to `ProcessPoolExecutor` to MPIRE for EM algorithm (2-8x faster, bypasses Python GIL, 50-90% memory reduction)
   - Parameter: `-t, --threads` (use 0 for all available cores)
+  - MPIRE is required (no fallback)
+- **chira_extract.py**: Changed from `multiprocessing.Process` to MPIRE for chimera extraction (50-90% memory reduction, 2-3x faster startup)
+  - MPIRE is required (no fallback)
 - **chira_merge.py**: Changed from `ThreadPoolExecutor` to chunk-based `multiprocessing.Pool` for transcript processing (4-8x faster)
   - Parameter changed: `-t, --threads` → `-p, --processes` (default: None, auto-detects CPU count)
   - **Chunk-based strategy**: Groups transcripts into chunks (~1000 per chunk) to reduce overhead for very large datasets (e.g., 387K+ transcripts)
@@ -199,11 +203,11 @@ If you prefer to install dependencies manually:
   - **chira_utilities.py**: Adaptive buffer sizing (8-16MB) for 10-50x I/O performance improvement
   - Install with: `pip install psutil` or `conda install psutil`
   - Falls back to safe defaults if not available (2GB per thread for BAM sorting, 8MB buffer for I/O)
-- **mpire** (HIGHLY RECOMMENDED for `chira_quantify.py` parallel processing)
-  - Enhanced multiprocessing framework for EM algorithm parallelization
+- **mpire** (REQUIRED for `chira_quantify.py` and `chira_extract.py` parallel processing)
+  - Enhanced multiprocessing framework for EM algorithm parallelization and chimera extraction
   - Benefits: 50-90% memory reduction, 2-3x faster startup, better performance
   - Install with: `pip install mpire` or `conda install -c conda-forge mpire`
-  - Falls back to ProcessPoolExecutor if not available (slower, more memory overhead)
+  - Required for parallel processing (no fallback)
 - pyliftover (for `download_mirbase_gff3.py` coordinate liftover)
 - requests (for `download_ensembl.py`)
 
@@ -232,12 +236,11 @@ If you prefer to install dependencies manually:
 
 **Installation commands:**
 ```bash
-# Core packages
-pip install biopython bcbiogff pysam requests
+# Core packages (required)
+pip install biopython bcbiogff pysam mpire requests
 
 # Optional packages (highly recommended for optimal performance)
 pip install psutil  # For automatic memory optimization, I/O bottleneck detection, and adaptive buffer sizing (10-50x I/O improvement)
-pip install mpire  # For enhanced multiprocessing performance in chira_quantify.py (50-90% memory reduction, 2-3x faster startup)
 pip install pyliftover  # For coordinate liftover in download_mirbase_gff3.py
 
 # Command-line tools
@@ -834,8 +837,8 @@ chira_merge.py -b mapped.bed -o output_dir -g annotation.gtf -f1 ref1.fasta -ao 
 - `-e, --em_threshold`: EM algorithm convergence threshold (default: 0.00001)
 - `-crl, --build_crls_too`: Create CRLs in addition to quantification
 - `-t, --threads`: Number of processes for parallel processing (default: 1, use 0 for all available cores)
-  - **Multiprocessing**: Uses MPIRE WorkerPool (if available) or ProcessPoolExecutor to parallelize EM algorithm E-step (multimapped reads) and aggregation step (bypasses Python GIL)
-  - **MPIRE benefits**: 50-90% memory reduction, 2-3x faster startup, better performance (install with `pip install mpire`)
+  - **Multiprocessing**: Uses MPIRE WorkerPool to parallelize EM algorithm E-step (multimapped reads) and aggregation step (bypasses Python GIL)
+  - **MPIRE benefits**: 50-90% memory reduction, 2-3x faster startup, better performance (required dependency)
   - **Performance**: 2-8x faster for large datasets with many multimapping reads
   - **Automatic**: Falls back to sequential processing for small datasets (<500 reads or num_processes × 50) to avoid process overhead
 

@@ -48,9 +48,11 @@ pip install -e .[optional]
 
 # This installs:
 # - psutil (for memory optimization and I/O performance)
-# - mpire (for enhanced multiprocessing performance in chira_quantify.py)
 # - requests (for downloading Ensembl files)
 # - pyliftover (for coordinate liftover)
+
+# Note: mpire is now a required dependency (installed automatically with pip install chira)
+# mpire provides enhanced multiprocessing performance in chira_quantify.py and chira_extract.py
 ```
 
 ### Step 4: Verify Installation
@@ -116,7 +118,7 @@ If you encounter import errors:
 
 ```bash
 # Reinstall dependencies
-pip install --upgrade biopython bcbio-gff pysam
+pip install --upgrade biopython bcbio-gff pysam mpire
 
 # Install optional dependencies for better performance
 pip install psutil

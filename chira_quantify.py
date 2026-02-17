@@ -5,24 +5,16 @@ from collections import defaultdict
 import argparse
 import chira_utilities
 import copy
-from concurrent.futures import ProcessPoolExecutor, as_completed
+# ProcessPoolExecutor no longer needed - MPIRE is required
 import math
 import mmap
 
-# OPTIMIZATION: MPIRE is HIGHLY RECOMMENDED for better multiprocessing performance
+# MPIRE is REQUIRED for multiprocessing performance
 # MPIRE provides shared objects, lower overhead, and better performance than ProcessPoolExecutor
 # Benefits: 50-90% memory reduction, 2-3x faster startup, better performance
-# Install with: pip install mpire
-# If MPIRE is not available, falls back to ProcessPoolExecutor (slower, more memory overhead)
-try:
-    from mpire import WorkerPool
-    from mpire.shared_objects import SharedObject
-    MPIRE_AVAILABLE = True
-except ImportError:
-    MPIRE_AVAILABLE = False
-    WorkerPool = None
-    SharedObject = None
-    # Fallback to ProcessPoolExecutor (included in Python standard library)
+# Install with: pip install mpire (or pip install chira)
+from mpire import WorkerPool
+from mpire.shared_objects import SharedObject
 
 
 def read_file_lines_mmap(file_path, use_mmap=True, mmap_threshold_mb=100):
@@ -409,27 +401,23 @@ def _process_reads_chunk_e_step(args, shared_objects=None):
     Process a chunk of reads in the E-step.
     Returns updated d_alpha values for reads in this chunk.
     
-    OPTIMIZATION: This function is designed for parallel execution with MPIRE WorkerPool
-    or ProcessPoolExecutor. With MPIRE, shared_objects provides access to d_rho_old without
-    copying, reducing memory overhead by 50-90% for large datasets.
+    OPTIMIZATION: This function is designed for parallel execution with MPIRE WorkerPool.
+    With MPIRE, shared_objects provides access to d_rho_old without copying, reducing memory
+    overhead by 50-90% for large datasets.
     
     Args:
-        args: Tuple of (readids_chunk, d_alpha_chunk) or just readids_chunk if using MPIRE
+        args: Tuple of (readids_chunk, d_alpha_chunk)
             - readids_chunk: List of read IDs to process
-            - d_alpha_chunk: Dict of {readid: {crlid: value}} for this chunk (if not using MPIRE)
-        shared_objects: Dictionary of shared objects (MPIRE only)
+            - d_alpha_chunk: Dict of {readid: {crlid: value}} for this chunk
+        shared_objects: Dictionary of shared objects (MPIRE)
             - d_rho_old: Dict of {crlid: relative_abundance} (shared, not copied)
     
     Returns:
         Dict of {readid: {crlid: updated_value}} for this chunk
     """
-    if shared_objects:
-        # MPIRE mode: use shared objects
-        readids_chunk, d_alpha_chunk = args
-        d_rho_old = shared_objects['d_rho_old']
-    else:
-        # ProcessPoolExecutor mode: unpack from args
-        readids_chunk, d_alpha_chunk, d_rho_old = args
+    # MPIRE mode: use shared objects
+    readids_chunk, d_alpha_chunk = args
+    d_rho_old = shared_objects['d_rho_old']
     d_alpha_updated = {}
     for readid in readids_chunk:
         # Match original logic: skip reads with only 1 CRL (shouldn't happen but defensive)
@@ -453,16 +441,16 @@ def _process_reads_chunk_aggregate(args, shared_objects=None):
     Process a chunk of reads for aggregation step.
     Returns a dictionary of CRL contributions from this chunk.
     
-    OPTIMIZATION: This function is designed for parallel execution with MPIRE WorkerPool
-    or ProcessPoolExecutor. Each process accumulates contributions into its own dictionary,
-    then results are merged. Since summation is commutative and associative, parallel
-    aggregation produces identical results to sequential.
+    OPTIMIZATION: This function is designed for parallel execution with MPIRE WorkerPool.
+    Each process accumulates contributions into its own dictionary, then results are merged.
+    Since summation is commutative and associative, parallel aggregation produces identical
+    results to sequential.
     
     Args:
         args: Tuple of (readids_chunk, d_alpha_chunk)
             - readids_chunk: List of read IDs to process
             - d_alpha_chunk: Dict of {readid: {crlid: value}} for this chunk
-        shared_objects: Dictionary of shared objects (MPIRE only, not used here but for API consistency)
+        shared_objects: Dictionary of shared objects (MPIRE, not used here but for API consistency)
     
     Returns:
         Dict of {crlid: aggregated_value} for this chunk
@@ -472,9 +460,9 @@ def _process_reads_chunk_aggregate(args, shared_objects=None):
     for readid in readids_chunk:
         for crlid in d_alpha_chunk[readid]:
             d_rho_chunk[crlid] += d_alpha_chunk[readid][crlid]
-    # Convert to regular dict: ProcessPoolExecutor pickles return values when sending
-    # results back to main process. While defaultdict can be pickled, converting to
-    # plain dict is more efficient (no factory function to pickle) and explicit.
+    # Convert to regular dict: MPIRE pickles return values when sending results back to
+    # main process. While defaultdict can be pickled, converting to plain dict is more
+    # efficient (no factory function to pickle) and explicit.
     return dict(d_rho_chunk)
 
 
@@ -536,42 +524,25 @@ def em(d_alpha, d_rho, library_size, l_multimap_readids, em_threshold, num_proce
         min_reads_threshold = max(500, num_processes * 50) if num_processes > 1 else float('inf')
         if num_processes > 1 and len(l_multimap_readids) > min_reads_threshold:
             if i == 1:  # Log only on first iteration to avoid spam
-                framework = "MPIRE" if MPIRE_AVAILABLE else "ProcessPoolExecutor"
-                print(f"  Parallelizing E-step: {len(l_multimap_readids)} multimapping reads across {num_processes} processes ({framework})", file=sys.stderr)
+                print(f"  Parallelizing E-step: {len(l_multimap_readids)} multimapping reads across {num_processes} processes (MPIRE)", file=sys.stderr)
             read_chunks = chunk_list(l_multimap_readids, num_processes)
             
-            if MPIRE_AVAILABLE:
-                # OPTIMIZATION: Use MPIRE with shared objects for better performance
-                # Shared objects reduce memory overhead by 50-90% for large datasets
-                shared_objects = SharedObject({'d_rho_old': d_rho_old})
-                
-                # Extract d_alpha subsets for each chunk
-                chunk_args = []
-                for chunk in read_chunks:
-                    d_alpha_chunk = {readid: d_alpha[readid].copy() for readid in chunk}
-                    chunk_args.append((chunk, d_alpha_chunk))
-                
-                with WorkerPool(n_jobs=num_processes, shared_objects=shared_objects) as pool:
-                    results = pool.map(_process_reads_chunk_e_step, chunk_args, progress_bar=False)
-                    # Collect updated values and merge back into d_alpha
-                    for d_alpha_updated in results:
-                        for readid, read_crls_updated in d_alpha_updated.items():
-                            d_alpha[readid] = read_crls_updated
-            else:
-                # Fallback to ProcessPoolExecutor if MPIRE is not available
-                # Extract d_alpha subsets for each chunk (needed for process-based parallelism)
-                chunk_args = []
-                for chunk in read_chunks:
-                    d_alpha_chunk = {readid: d_alpha[readid].copy() for readid in chunk}
-                    chunk_args.append((chunk, d_alpha_chunk, d_rho_old))
-                
-                with ProcessPoolExecutor(max_workers=num_processes) as executor:
-                    futures = [executor.submit(_process_reads_chunk_e_step, args) for args in chunk_args]
-                    # Collect updated values and merge back into d_alpha
-                    for future in as_completed(futures):
-                        d_alpha_updated = future.result()
-                        for readid, read_crls_updated in d_alpha_updated.items():
-                            d_alpha[readid] = read_crls_updated
+            # OPTIMIZATION: Use MPIRE with shared objects for better performance
+            # Shared objects reduce memory overhead by 50-90% for large datasets
+            shared_objects = SharedObject({'d_rho_old': d_rho_old})
+            
+            # Extract d_alpha subsets for each chunk
+            chunk_args = []
+            for chunk in read_chunks:
+                d_alpha_chunk = {readid: d_alpha[readid].copy() for readid in chunk}
+                chunk_args.append((chunk, d_alpha_chunk))
+            
+            with WorkerPool(n_jobs=num_processes, shared_objects=shared_objects) as pool:
+                results = pool.map(_process_reads_chunk_e_step, chunk_args, progress_bar=False)
+                # Collect updated values and merge back into d_alpha
+                for d_alpha_updated in results:
+                    for readid, read_crls_updated in d_alpha_updated.items():
+                        d_alpha[readid] = read_crls_updated
         else:
             # Sequential processing for small datasets or single process
             if num_processes > 1 and len(l_multimap_readids) <= min_reads_threshold and i == 1:
@@ -600,8 +571,7 @@ def em(d_alpha, d_rho, library_size, l_multimap_readids, em_threshold, num_proce
             min_reads_threshold_agg = max(500, num_processes * 50)
             if len(all_readids) > min_reads_threshold_agg:
                 if i == 1:  # Log only on first iteration to avoid spam
-                    framework = "MPIRE" if MPIRE_AVAILABLE else "ProcessPoolExecutor"
-                    print(f"  Parallelizing aggregation: {len(all_readids)} reads across {num_processes} processes ({framework})", file=sys.stderr)
+                    print(f"  Parallelizing aggregation: {len(all_readids)} reads across {num_processes} processes (MPIRE)", file=sys.stderr)
                 read_chunks = chunk_list(all_readids, num_processes)
                 
                 # Extract d_alpha subsets for each chunk (needed for process-based parallelism)
@@ -610,22 +580,12 @@ def em(d_alpha, d_rho, library_size, l_multimap_readids, em_threshold, num_proce
                     d_alpha_chunk = {readid: d_alpha[readid].copy() for readid in chunk}
                     chunk_args.append((chunk, d_alpha_chunk))
                 
-                if MPIRE_AVAILABLE:
-                    # OPTIMIZATION: Use MPIRE for better performance (no shared objects needed here)
-                    with WorkerPool(n_jobs=num_processes) as pool:
-                        results = pool.map(_process_reads_chunk_aggregate, chunk_args, progress_bar=False)
-                        for d_rho_chunk in results:
-                            for crlid, value in d_rho_chunk.items():
-                                d_rho[crlid] += value
-                else:
-                    # Fallback to ProcessPoolExecutor if MPIRE is not available
-                    with ProcessPoolExecutor(max_workers=num_processes) as executor:
-                        futures = [executor.submit(_process_reads_chunk_aggregate, args) 
-                                  for args in chunk_args]
-                        for future in as_completed(futures):
-                            d_rho_chunk = future.result()
-                            for crlid, value in d_rho_chunk.items():
-                                d_rho[crlid] += value
+                # OPTIMIZATION: Use MPIRE for better performance (no shared objects needed here)
+                with WorkerPool(n_jobs=num_processes) as pool:
+                    results = pool.map(_process_reads_chunk_aggregate, chunk_args, progress_bar=False)
+                    for d_rho_chunk in results:
+                        for crlid, value in d_rho_chunk.items():
+                            d_rho[crlid] += value
             else:
                 # Sequential aggregation for small datasets even with threading enabled
                 if len(all_readids) <= min_reads_threshold_agg and i == 1:
@@ -979,7 +939,7 @@ def parse_arguments():
     parser.add_argument('-p', '--processes', action='store', type=int, default=0, metavar='',
                         dest='num_processes',
                         help='Number of parallel processes to use for EM algorithm. Use 0 to use all available CPU cores. '
-                             'Default: 0 (use all available cores). Uses MPIRE WorkerPool (if available) or ProcessPoolExecutor '
+                             'Default: 0 (use all available cores). Uses MPIRE WorkerPool for parallel processing. '
                              'for true parallelism (bypasses GIL). MPIRE provides better performance with shared objects. '
                              'Multi-processing is most beneficial for large datasets (>500 multimapping reads). '
                              'Set to 1 to disable parallel processing. Install MPIRE with: pip install mpire')
