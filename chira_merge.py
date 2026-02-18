@@ -9,7 +9,7 @@ from collections import defaultdict
 import datetime
 import itertools
 import re
-import warnings
+
 # MPIRE is REQUIRED for multiprocessing performance
 # MPIRE provides shared objects, lower overhead, and better performance than Pool
 # Benefits: 50-90% memory reduction, 2-3x faster startup, better performance
@@ -24,12 +24,7 @@ from mpire import WorkerPool
 # in newer Biopython versions in favor of Seq(None, length)
 # Upgrading Biopython alone won't fix this - bcbiogff needs to be updated to use the new API
 # This warning suppression is a workaround until bcbiogff is updated
-try:
-    from Bio import BiopythonDeprecationWarning
-    warnings.filterwarnings("ignore", message=".*UnknownSeq.*deprecated.*", category=BiopythonDeprecationWarning)
-except ImportError:
-    # Fallback for older Biopython versions that don't have BiopythonDeprecationWarning
-    warnings.filterwarnings("ignore", message=".*UnknownSeq.*deprecated.*", category=DeprecationWarning)
+
 from BCBio import GFF
 
 # OPTIMIZATION: Pre-compile regex patterns for better performance
@@ -274,13 +269,16 @@ def write_segments(prev_readid, filtered_alignments, segment_overlap_fraction, f
             # Split once and reuse the parsed fields
             f = alignment.split('\t')
             d = f[3].split(",")
-            
             # OPTIMIZATION: Use f-strings for faster string formatting
             # f-strings are faster than join() for small lists and string concatenation
             # Expected Speedup: 1.3-2x for string operations
             # Note: Extract tab character to variable to avoid backslash in f-string expression
             tab_char = '\t'
-            output_line = f"{f[0]}{tab_char}{f[1]}{tab_char}{f[2]}{tab_char}{prev_readid}|{matched_segment},{','.join(d[1:])}{tab_char}{tab_char.join(f[4:])}\n"
+            # Handle newline: strip from last field if present, then add explicitly for batch writing
+            # This ensures consistent newline handling regardless of input format
+            f_clean = f[:-1] + [f[-1].rstrip('\n\r')] if f and f[-1].endswith(('\n', '\r')) else f
+            f_clean_4 = f_clean[4:] if len(f_clean) > 4 else f[4:]
+            output_line = f"{f_clean[0]}{tab_char}{f_clean[1]}{tab_char}{f_clean[2]}{tab_char}{prev_readid}|{matched_segment},{','.join(d[1:])}{tab_char}{tab_char.join(f_clean_4)}\n"
             
             # OPTIMIZATION: Batch writing - collect lines in buffer
             output_buffer.append(output_line)
@@ -1071,7 +1069,7 @@ def transcript_to_genomic_pos(transcriptomic_bed, genomic_bed, f_geneexonbed, f_
                 genomicstart = exid2end[exonid] - (txend - exonstart)
                 genomicend = exid2end[exonid] - (txstart - exonstart)
             else:
-                sys.exit("ERROR: Check polarity " + pol + "in line: " + line + "\n")
+                sys.exit("ERROR: Check polarity " + pol + " in line: " + line + "\n")
             # OPTIMIZATION: Use f-string for faster string formatting
             # f-strings are faster than join() for small lists
             # Expected Speedup: 1.3-2x for string operations

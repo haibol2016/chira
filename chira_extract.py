@@ -11,6 +11,7 @@ from Bio import SeqIO
 import subprocess
 import math
 import gzip
+import warnings
 
 # OPTIMIZATION: Try to import intervaltree for efficient interval queries
 # intervaltree provides O(log n) lookup instead of O(n) linear search
@@ -20,6 +21,14 @@ try:
 except ImportError:
     INTERVALTREE_AVAILABLE = False
     IntervalTree = None
+
+try:
+    from Bio import BiopythonDeprecationWarning
+    warnings.filterwarnings("ignore", message=".*UnknownSeq.*deprecated.*", category=BiopythonDeprecationWarning)
+except ImportError:
+    # Fallback for older Biopython versions that don't have BiopythonDeprecationWarning
+    warnings.filterwarnings("ignore", message=".*UnknownSeq.*deprecated.*", category=DeprecationWarning)
+
 
 # MPIRE is REQUIRED for multiprocessing performance
 # MPIRE provides shared objects, lower overhead, and better performance than Process
