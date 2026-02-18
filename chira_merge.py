@@ -13,9 +13,12 @@ import warnings
 # MPIRE is REQUIRED for multiprocessing performance
 # MPIRE provides shared objects, lower overhead, and better performance than Pool
 # Benefits: 50-90% memory reduction, 2-3x faster startup, better performance
-# Install with: pip install mpire (or pip install chira)
+# Install with: pip install mpire (or pip install chira, or conda install -c conda-forge mpire)
+# Note: Requires MPIRE >= 2.4.0 for shared_objects support
 from mpire import WorkerPool
-from mpire.shared_objects import SharedObject
+# Note: MPIRE 2.10.1+ doesn't use a SharedObject class
+# Shared objects are passed directly to WorkerPool via shared_objects parameter
+# See: https://sybrenjansen.github.io/mpire/v2.10.1/usage/workerpool/shared_objects.html
 # Suppress Biopython deprecation warning from BCBio.GFF using UnknownSeq
 # The bcbiogff package (BCBio) internally uses UnknownSeq(length) which is deprecated
 # in newer Biopython versions in favor of Seq(None, length)
@@ -523,7 +526,7 @@ def _create_transcript_chunks(d_desc, num_chunks, num_transcripts):
     return chunks
 
 
-def _process_transcript_chunk_overlap(args_tuple, shared_objects=None):
+def _process_transcript_chunk_overlap(shared_objects, args_tuple):
     """
     OPTIMIZATION: Worker function for parallel processing of transcript chunks.
     
@@ -531,11 +534,12 @@ def _process_transcript_chunk_overlap(args_tuple, shared_objects=None):
     Uses MPIRE shared objects to access d_desc from shared memory, avoiding memory copies.
     
     Args:
+        shared_objects: Dictionary of shared objects (MPIRE) - passed as first arg by MPIRE
+            - d_desc: Dictionary of {transcript: {positions -> alignments}} (shared, not copied)
         args_tuple: Tuple of (chunk_transcripts, alignment_overlap_fraction, min_locus_size)
             - chunk_transcripts: List of transcript identifiers (e.g., ["ENST000001\t+", "ENST000002\t-", ...])
             - alignment_overlap_fraction: Minimum overlap fraction for merging
             - min_locus_size: Minimum number of alignments per locus
-        shared_objects: MPIRE SharedObject containing d_desc dictionary
     
     Returns:
         List of (transcript, output_lines) tuples where output_lines is a list of BED lines to write
@@ -544,11 +548,8 @@ def _process_transcript_chunk_overlap(args_tuple, shared_objects=None):
     
     # OPTIMIZATION: Access d_desc from shared memory instead of copying chunk_data
     # This avoids memory overhead from deep copying dictionaries
-    if shared_objects:
-        d_desc = shared_objects['d_desc']
-    else:
-        # Fallback if shared_objects not provided (shouldn't happen with MPIRE)
-        raise ValueError("shared_objects required for MPIRE worker function")
+    # MPIRE passes shared_objects as first argument
+    d_desc = shared_objects['d_desc']
     
     results = []
     
@@ -620,7 +621,7 @@ def _process_transcript_blockbuster(args_tuple):
     return transcript, t_merged
 
 
-def _process_transcript_chunk_blockbuster(args_tuple, shared_objects=None):
+def _process_transcript_chunk_blockbuster(shared_objects, args_tuple):
     """
     OPTIMIZATION: Worker function for parallel processing of transcript chunks in blockbuster mode.
     
@@ -628,10 +629,11 @@ def _process_transcript_chunk_blockbuster(args_tuple, shared_objects=None):
     Uses MPIRE shared objects to access d_desc from shared memory, avoiding memory copies.
     
     Args:
+        shared_objects: Dictionary of shared objects (MPIRE) - passed as first arg by MPIRE
+            - d_desc: Dictionary of {transcript: {positions -> alignments}} (shared, not copied)
         args_tuple: Tuple of (chunk_transcripts, alignment_overlap_fraction)
             - chunk_transcripts: List of transcript identifiers (e.g., ["ENST000001\t+", "ENST000002\t-", ...])
             - alignment_overlap_fraction: Minimum overlap fraction for merging
-        shared_objects: MPIRE SharedObject containing d_desc dictionary
     
     Returns:
         List of (transcript, t_merged) tuples where t_merged is list of merged positions
@@ -640,11 +642,8 @@ def _process_transcript_chunk_blockbuster(args_tuple, shared_objects=None):
     
     # OPTIMIZATION: Access d_desc from shared memory instead of copying chunk_data
     # This avoids memory overhead from deep copying dictionaries
-    if shared_objects:
-        d_desc = shared_objects['d_desc']
-    else:
-        # Fallback if shared_objects not provided (shouldn't happen with MPIRE)
-        raise ValueError("shared_objects required for MPIRE worker function")
+    # MPIRE passes shared_objects as first argument
+    d_desc = shared_objects['d_desc']
     
     results = []
     
@@ -702,7 +701,9 @@ def merge_loci_overlap(outdir, alignment_overlap_fraction, min_locus_size, num_p
         # OPTIMIZATION: Use MPIRE with shared objects to avoid copying d_desc
         # Benefits: 50-90% memory reduction, 2-3x faster startup, shared memory access
         # d_desc is shared in memory instead of pickled per process
-        shared_objects = SharedObject({'d_desc': d_desc})
+        # Pass shared objects directly to WorkerPool (MPIRE 2.10.1+)
+        # Shared objects are passed as first argument to worker functions
+        shared_objects_dict = {'d_desc': d_desc}
         
         # Group transcripts into chunks (only returns chunk_transcripts lists, not copies)
         chunks = _create_transcript_chunks(d_desc, num_chunks, num_transcripts)
@@ -713,7 +714,7 @@ def merge_loci_overlap(outdir, alignment_overlap_fraction, min_locus_size, num_p
         
         # Process chunks in parallel using MPIRE WorkerPool
         print(str(datetime.datetime.now()), f"Processing {num_transcripts} transcripts in {len(chunk_args)} chunks using {num_processes} processes")
-        with WorkerPool(n_jobs=num_processes, shared_objects=shared_objects) as pool:
+        with WorkerPool(n_jobs=num_processes, shared_objects=shared_objects_dict) as pool:
             chunk_results = pool.map(_process_transcript_chunk_overlap, chunk_args, progress_bar=False)
         
         # Flatten results: chunk_results is a list of lists of (transcript, output_lines) tuples
@@ -867,7 +868,9 @@ def merge_loci_blockbuster(outdir, distance, min_cluster_height, min_block_heigh
         # OPTIMIZATION: Use MPIRE with shared objects to avoid copying d_desc
         # Benefits: 50-90% memory reduction, 2-3x faster startup, shared memory access
         # d_desc is shared in memory instead of pickled per process
-        shared_objects = SharedObject({'d_desc': d_desc})
+        # Pass shared objects directly to WorkerPool (MPIRE 2.10.1+)
+        # Shared objects are passed as first argument to worker functions
+        shared_objects_dict = {'d_desc': d_desc}
         
         # Group transcripts into chunks (only returns chunk_transcripts lists, not copies)
         chunks = _create_transcript_chunks(d_desc, num_chunks, num_transcripts)
@@ -878,7 +881,7 @@ def merge_loci_blockbuster(outdir, distance, min_cluster_height, min_block_heigh
         
         # Process chunks in parallel using MPIRE WorkerPool
         print(str(datetime.datetime.now()), f"Processing {num_transcripts} transcripts in {len(chunk_args)} chunks using {num_processes} processes")
-        with WorkerPool(n_jobs=num_processes, shared_objects=shared_objects) as pool:
+        with WorkerPool(n_jobs=num_processes, shared_objects=shared_objects_dict) as pool:
             chunk_results = pool.map(_process_transcript_chunk_blockbuster, chunk_args, progress_bar=False)
         
         # Flatten results: chunk_results is a list of lists of (transcript, t_merged) tuples

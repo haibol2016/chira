@@ -12,9 +12,12 @@ import mmap
 # MPIRE is REQUIRED for multiprocessing performance
 # MPIRE provides shared objects, lower overhead, and better performance than ProcessPoolExecutor
 # Benefits: 50-90% memory reduction, 2-3x faster startup, better performance
-# Install with: pip install mpire (or pip install chira)
+# Install with: pip install mpire (or pip install chira, or conda install -c conda-forge mpire)
+# Note: Requires MPIRE >= 2.4.0 for shared_objects support
 from mpire import WorkerPool
-from mpire.shared_objects import SharedObject
+# Note: MPIRE 2.10.1+ doesn't use a SharedObject class
+# Shared objects are passed directly to WorkerPool via shared_objects parameter
+# See: https://sybrenjansen.github.io/mpire/v2.10.1/usage/workerpool/shared_objects.html
 
 
 def read_file_lines_mmap(file_path, use_mmap=True, mmap_threshold_mb=100):
@@ -396,7 +399,7 @@ def build_crls(build_crls_too, bed, merged_bed, crl_file, crl_share_cutoff, min_
             fh_crl_file.writelines(entry_buffer)
 
 
-def _process_reads_chunk_e_step(args, shared_objects=None):
+def _process_reads_chunk_e_step(shared_objects, args):
     """
     Process a chunk of reads in the E-step.
     Returns updated d_alpha values for reads in this chunk.
@@ -406,16 +409,16 @@ def _process_reads_chunk_e_step(args, shared_objects=None):
     overhead by 50-90% for large datasets.
     
     Args:
+        shared_objects: Dictionary of shared objects (MPIRE) - passed as first arg by MPIRE
+            - d_rho_old: Dict of {crlid: relative_abundance} (shared, not copied)
         args: Tuple of (readids_chunk, d_alpha_chunk)
             - readids_chunk: List of read IDs to process
             - d_alpha_chunk: Dict of {readid: {crlid: value}} for this chunk
-        shared_objects: Dictionary of shared objects (MPIRE)
-            - d_rho_old: Dict of {crlid: relative_abundance} (shared, not copied)
     
     Returns:
         Dict of {readid: {crlid: updated_value}} for this chunk
     """
-    # MPIRE mode: use shared objects
+    # MPIRE mode: use shared objects (passed as first argument by MPIRE)
     readids_chunk, d_alpha_chunk = args
     d_rho_old = shared_objects['d_rho_old']
     d_alpha_updated = {}
@@ -436,7 +439,7 @@ def _process_reads_chunk_e_step(args, shared_objects=None):
     return d_alpha_updated
 
 
-def _process_reads_chunk_aggregate(args, shared_objects=None):
+def _process_reads_chunk_aggregate(shared_objects, args):
     """
     Process a chunk of reads for aggregation step.
     Returns a dictionary of CRL contributions from this chunk.
@@ -447,10 +450,11 @@ def _process_reads_chunk_aggregate(args, shared_objects=None):
     results to sequential.
     
     Args:
+        shared_objects: Dictionary of shared objects (MPIRE) - passed as first arg by MPIRE
+            Not used in this function but required for MPIRE API consistency
         args: Tuple of (readids_chunk, d_alpha_chunk)
             - readids_chunk: List of read IDs to process
             - d_alpha_chunk: Dict of {readid: {crlid: value}} for this chunk
-        shared_objects: Dictionary of shared objects (MPIRE, not used here but for API consistency)
     
     Returns:
         Dict of {crlid: aggregated_value} for this chunk
@@ -529,7 +533,9 @@ def em(d_alpha, d_rho, library_size, l_multimap_readids, em_threshold, num_proce
             
             # OPTIMIZATION: Use MPIRE with shared objects for better performance
             # Shared objects reduce memory overhead by 50-90% for large datasets
-            shared_objects = SharedObject({'d_rho_old': d_rho_old})
+            # Pass shared objects directly to WorkerPool (MPIRE 2.10.1+)
+            # Shared objects are passed as first argument to worker functions
+            shared_objects_dict = {'d_rho_old': d_rho_old}
             
             # Extract d_alpha subsets for each chunk
             chunk_args = []
@@ -537,7 +543,7 @@ def em(d_alpha, d_rho, library_size, l_multimap_readids, em_threshold, num_proce
                 d_alpha_chunk = {readid: d_alpha[readid].copy() for readid in chunk}
                 chunk_args.append((chunk, d_alpha_chunk))
             
-            with WorkerPool(n_jobs=num_processes, shared_objects=shared_objects) as pool:
+            with WorkerPool(n_jobs=num_processes, shared_objects=shared_objects_dict) as pool:
                 results = pool.map(_process_reads_chunk_e_step, chunk_args, progress_bar=False)
                 # Collect updated values and merge back into d_alpha
                 for d_alpha_updated in results:

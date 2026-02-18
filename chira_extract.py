@@ -24,9 +24,12 @@ except ImportError:
 # MPIRE is REQUIRED for multiprocessing performance
 # MPIRE provides shared objects, lower overhead, and better performance than Process
 # Benefits: 50-90% memory reduction, 2-3x faster startup, better performance
-# Install with: pip install mpire (or pip install chira)
+# Install with: pip install mpire (or pip install chira, or conda install -c conda-forge mpire)
+# Note: Requires MPIRE >= 2.4.0 for shared_objects support
 from mpire import WorkerPool
-from mpire.shared_objects import SharedObject
+# Note: MPIRE 2.10.1+ doesn't use a SharedObject class
+# Shared objects are passed directly to WorkerPool via shared_objects parameter
+# See: https://sybrenjansen.github.io/mpire/v2.10.1/usage/workerpool/shared_objects.html
 
 
 d_gene_annotations = defaultdict(lambda: defaultdict(str))
@@ -1277,13 +1280,22 @@ def run_chimera_extraction(args, d_reflen1, d_reflen2, tpm_cutoff_value, no_of_r
     # OPTIMIZATION: Use MPIRE with shared objects for better performance
     # Shared objects reduce memory overhead by 50-90% for large datasets
     # d_ref_lengths1 and d_ref_lengths2 are shared in memory instead of pickled per process
-    shared_objects = SharedObject({
+    # Pass shared objects directly to WorkerPool (MPIRE 2.10.1+)
+    # Shared objects are passed as first argument to worker functions
+    shared_objects_dict = {
         'd_ref_lengths1': d_reflen1,
         'd_ref_lengths2': d_reflen2
-    })
+    }
     
-    def process_chunk(chunk_data):
-        """Wrapper function to process a chunk with shared objects."""
+    def process_chunk(shared_objects, chunk_data):
+        """Wrapper function to process a chunk with shared objects.
+        
+        Args:
+            shared_objects: Dictionary of shared objects (MPIRE) - passed as first arg by MPIRE
+                - d_ref_lengths1: Dictionary of reference lengths for first priority reference
+                - d_ref_lengths2: Dictionary of reference lengths for second priority reference
+            chunk_data: Dictionary containing chunk processing parameters
+        """
         return write_chimeras(
             chunk_data['chunk_start'],
             chunk_data['chunk_end'],
@@ -1303,7 +1315,7 @@ def run_chimera_extraction(args, d_reflen1, d_reflen2, tpm_cutoff_value, no_of_r
             shared_objects=shared_objects
         )
     
-    with WorkerPool(n_jobs=args.processes, shared_objects=shared_objects) as pool:
+    with WorkerPool(n_jobs=args.processes, shared_objects=shared_objects_dict) as pool:
         pool.map(process_chunk, chunk_args, progress_bar=False)
 
 

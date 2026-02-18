@@ -40,10 +40,10 @@ RUN apt-get update && \
         r-batchtools \
         r-jsonlite \
         && \
-    # Install MPIRE via pip (required dependency for chira_quantify.py and chira_extract.py)
-    # MPIRE provides enhanced multiprocessing with shared objects (50-90% memory reduction, 2-3x faster startup)
-    # Note: MPIRE is not available in conda-forge, so we install via pip
-    /opt/conda/bin/pip install --no-cache-dir mpire && \
+    # Install MPIRE with version requirement (>=2.4.0 for shared_objects support)
+    # Try conda-forge first, fallback to pip if version is too old
+    (micromamba install -y -n base -c conda-forge "mpire>=2.4.0" 2>/dev/null || \
+     /opt/conda/bin/pip install --no-cache-dir "mpire>=2.4.0") && \
     micromamba clean -afy && \
     # Create symlinks for ALL conda binaries in /usr/local/bin so they're always in PATH
     # This ensures tools are available even if PATH is overridden in Singularity
