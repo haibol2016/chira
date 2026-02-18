@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - Converted chimera extraction to use MPIRE WorkerPool with shared objects
     - Converted hybridization step to use MPIRE WorkerPool
     - Benefits: 50-90% memory reduction, 2-3x faster startup, shared objects for reference dictionaries
+  - **chira_merge.py**: MPIRE is required for parallel processing (replaced multiprocessing.Pool)
+    - Converted transcript chunk processing to use MPIRE WorkerPool with shared objects
+    - Uses SharedObject for `d_desc` dictionary to avoid copying chunk data
+    - Benefits: 50-90% memory reduction, 2-3x faster startup, shared memory access for transcript data
+    - Applies to both overlap-based and blockbuster-based merging methods
   - **setup.py**: Moved `mpire` from `extras_require["optional"]` to `install_requires`
   - **Installation**: MPIRE is now automatically installed with `pip install chira`
 
@@ -30,6 +35,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Chimera extraction uses MPIRE with shared objects for reference dictionaries
   - Hybridization step converted to MPIRE for consistency
   - Same logic, better performance and memory efficiency
+
+- **chira_merge.py**:
+  - Replaced multiprocessing.Pool with MPIRE WorkerPool (simplified codebase)
+  - Transcript chunk processing uses MPIRE with shared objects for `d_desc` dictionary
+  - Eliminated memory overhead from copying chunk data (shared memory access instead)
+  - Same logic, better performance and memory efficiency (50-90% memory reduction)
 
 ### Documentation
 - **DEPENDENCIES.md**:

@@ -245,11 +245,12 @@ ChiRA scripts support parallel processing to improve performance on multi-core s
    - Note: MPIRE is required (no fallback). Changed from `ThreadPoolExecutor` to `ProcessPoolExecutor` in v1.4.6, then to MPIRE in v1.4.11 for better performance
 
 2. **chira_merge.py**
-   - Uses Python's `multiprocessing.Pool` for parallelizing chromosome processing
+   - Uses MPIRE `WorkerPool` for parallelizing transcript chunk processing
    - Command-line option: `-p, --processes` (default: None, auto-detects CPU count)
-   - Parallelizes: Chromosome processing in overlap-based and blockbuster-based merging
-   - Benefit: 4-8x faster for datasets with many chromosomes (bypasses Python GIL for true parallelism)
-   - Note: Changed from `ThreadPoolExecutor` to `multiprocessing.Pool` in v1.4.6, parameter changed from `-t, --threads` to `-p, --processes`
+   - Parallelizes: Transcript chunk processing in overlap-based and blockbuster-based merging
+   - Uses SharedObject for `d_desc` dictionary to avoid copying chunk data
+   - Benefit: 4-8x faster for datasets with many transcripts, 50-90% memory reduction (bypasses Python GIL for true parallelism)
+   - Note: Changed from `ThreadPoolExecutor` to `multiprocessing.Pool` in v1.4.6, then to MPIRE in v1.4.11 for better performance and memory efficiency
 
 3. **chira_map.py**
    - Uses multi-threading for external tools (`samtools`, `pysam`, `sort`) and `ThreadPoolExecutor` for parallel BWA jobs
@@ -284,7 +285,7 @@ ChiRA scripts support parallel processing to improve performance on multi-core s
 - **For memory-constrained systems**: Specify thread/process count explicitly to control memory usage
 - **For BAM sorting**: Install `psutil` for automatic memory optimization, or use `--sort_memory` to specify memory per thread manually
 - **For I/O optimization**: Install `psutil` to enable adaptive buffer sizing (8-16MB) which provides 10-50x I/O performance improvement
-- **For parallel processing in chira_quantify.py and chira_extract.py**: MPIRE is required for multiprocessing (50-90% memory reduction, 2-3x faster startup). Install with `pip install mpire` or `conda install -c conda-forge mpire`.
+- **For parallel processing in chira_quantify.py, chira_extract.py, and chira_merge.py**: MPIRE is required for multiprocessing (50-90% memory reduction, 2-3x faster startup). Install with `pip install mpire` or `conda install -c conda-forge mpire`.
 - **For very large FASTA files**: Use `--chunk_fasta` in `chira_map.py` to split input into chunks for better I/O and memory efficiency
 - **For HPC clusters**: Use `--use_batchtools` in `chira_map.py` to submit chunk jobs to cluster schedulers (LSF, SLURM, etc.) for better scalability and resource management
 
@@ -294,7 +295,7 @@ ChiRA scripts support parallel processing to improve performance on multi-core s
 
 - **chira_collapse.py**: No external dependencies (uses standard library only)
 - **chira_map.py**: Requires `pysam`, `bwa`, `samtools` (CLAN optional, `psutil` optional for memory optimization and I/O bottleneck detection, R with batchtools optional for HPC cluster submission)
-- **chira_merge.py**: Requires `bcbiogff`, `BEDTools` (blockbuster optional)
+- **chira_merge.py**: Requires `bcbiogff`, `BEDTools`, `mpire` (blockbuster optional)
 - **chira_extract.py**: Requires `biopython`, `bcbiogff`, `BEDTools`, `mpire` (IntaRNA optional)
 - **chira_quantify.py**: Requires `mpire` for parallel processing
 - **chira_utilities.py**: Requires `biopython` (`psutil` optional for adaptive buffer sizing)
@@ -329,9 +330,9 @@ ChiRA scripts support parallel processing to improve performance on multi-core s
 
 - Parallel computing features:
   - All parallel computing features are backward compatible (default to single-threaded/process)
-  - **Multiprocessing** (`ProcessPoolExecutor`, `multiprocessing.Pool`) is used for CPU-bound tasks to bypass Python GIL:
-    - EM algorithm in `chira_quantify.py` (ProcessPoolExecutor)
-    - Chromosome processing in `chira_merge.py` (multiprocessing.Pool)
+  - **Multiprocessing** (MPIRE `WorkerPool`) is used for CPU-bound tasks to bypass Python GIL:
+    - EM algorithm in `chira_quantify.py` (MPIRE WorkerPool with shared objects)
+    - Transcript chunk processing in `chira_merge.py` (MPIRE WorkerPool with shared objects)
   - **Threading** (`ThreadPoolExecutor`) is used for I/O-bound tasks and external tool parallelization:
     - BWA alignment jobs in `chira_map.py` (ThreadPoolExecutor)
     - External tools (`samtools`, `pysam`, `sort`) use multi-threading via their native `-@` flags

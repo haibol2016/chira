@@ -52,7 +52,7 @@ pip install -e .[optional]
 # - pyliftover (for coordinate liftover)
 
 # Note: mpire is now a required dependency (installed automatically with pip install chira)
-# mpire provides enhanced multiprocessing performance in chira_quantify.py and chira_extract.py
+# mpire provides enhanced multiprocessing performance in chira_quantify.py, chira_extract.py, and chira_merge.py
 ```
 
 ### Step 4: Verify Installation

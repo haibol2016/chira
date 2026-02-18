@@ -4,7 +4,6 @@ import argparse
 import os
 import sys
 from collections import defaultdict
-# multiprocessing.Process no longer needed - MPIRE is required
 import itertools
 import datetime
 from BCBio import GFF

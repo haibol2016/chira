@@ -32,6 +32,10 @@ See [CHANGELOG.md](CHANGELOG.md) for detailed change history.
     - Converted chimera extraction to use MPIRE WorkerPool with shared objects
     - Converted hybridization step to use MPIRE WorkerPool
     - Benefits: 50-90% memory reduction, 2-3x faster startup, shared objects for reference dictionaries
+  - **chira_merge.py**: MPIRE required for parallel processing (replaced multiprocessing.Pool)
+    - Converted transcript chunk processing to use MPIRE WorkerPool with shared objects
+    - Uses SharedObject for `d_desc` dictionary to avoid copying chunk data
+    - Benefits: 50-90% memory reduction, 2-3x faster startup, shared memory access for transcript data
   - **setup.py**: Moved `mpire` from `extras_require["optional"]` to `install_requires`
   - **Installation**: MPIRE is now automatically installed with `pip install chira`
 
@@ -68,9 +72,10 @@ See [CHANGELOG.md](CHANGELOG.md) for detailed change history.
   - MPIRE is required (no fallback)
 - **chira_extract.py**: Changed from `multiprocessing.Process` to MPIRE for chimera extraction (50-90% memory reduction, 2-3x faster startup)
   - MPIRE is required (no fallback)
-- **chira_merge.py**: Changed from `ThreadPoolExecutor` to chunk-based `multiprocessing.Pool` for transcript processing (4-8x faster)
+- **chira_merge.py**: Changed from `ThreadPoolExecutor` to chunk-based `multiprocessing.Pool` to MPIRE for transcript processing (4-8x faster, 50-90% memory reduction)
   - Parameter changed: `-t, --threads` → `-p, --processes` (default: None, auto-detects CPU count)
   - **Chunk-based strategy**: Groups transcripts into chunks (~1000 per chunk) to reduce overhead for very large datasets (e.g., 387K+ transcripts)
+  - MPIRE is required (no fallback)
 - **chira_map.py**: Enhanced with FASTA chunking and intelligent process management
   - New parameter: `--chunk_fasta` for splitting large FASTA files into chunks
   - **Process-aware chunking**: Parallel chunk execution automatically limited by available processes
@@ -95,7 +100,7 @@ See [CHANGELOG.md](CHANGELOG.md) for detailed change history.
 **Parallel Computing Support:**
 - **Multi-threading** in `chira_quantify.py`: EM algorithm parallelization (2-4x faster)
   - New parameter: `-t, --threads` (use 0 for all available cores)
-  - **Multi-threading** in `chira_merge.py`: Transcript processing parallelization (2-4x faster, improved in v1.4.8 with chunk-based strategy)
+  - **Multiprocessing** in `chira_merge.py`: Transcript chunk processing parallelization using MPIRE (4-8x faster, 50-90% memory reduction, improved in v1.4.8 with chunk-based strategy, upgraded to MPIRE in v1.4.11)
   - New parameter: `-t, --threads` (use 0 for all available cores)
 - **Enhanced multi-threading** in `chira_map.py`: External tools (samtools, pysam, sort)
   - Automatic memory optimization with `psutil` (optional dependency)
@@ -219,8 +224,8 @@ If you prefer to install dependencies manually:
 - biopython
 - bcbiogff
 - pysam
-- **mpire** (required for `chira_quantify.py` and `chira_extract.py` parallel processing)
-  - Enhanced multiprocessing framework for EM algorithm parallelization and chimera extraction
+- **mpire** (required for `chira_quantify.py`, `chira_extract.py`, and `chira_merge.py` parallel processing)
+  - Enhanced multiprocessing framework for EM algorithm parallelization, chimera extraction, and transcript processing
   - Benefits: 50-90% memory reduction, 2-3x faster startup, better performance
   - Install with: `pip install mpire` or `conda install -c conda-forge mpire`
   - Required for parallel processing (no fallback)

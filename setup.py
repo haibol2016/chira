@@ -69,10 +69,10 @@ setup(
         "biopython",      # For FASTA/sequence parsing (chira_extract.py, chira_utilities.py)
         "bcbio-gff",      # For GFF/GTF annotation file parsing (chira_extract.py, chira_merge.py)
         "pysam",          # For BAM file manipulation (chira_map.py: merging, sorting BAM files)
-        "mpire",          # For enhanced multiprocessing performance (chira_quantify.py, chira_extract.py)
-                          # - Provides shared objects, lower overhead, and better performance than ProcessPoolExecutor/Process
+        "mpire",          # For enhanced multiprocessing performance (chira_quantify.py, chira_extract.py, chira_merge.py)
+                          # - Provides shared objects, lower overhead, and better performance than ProcessPoolExecutor/Process/Pool
                           # - Benefits: 50-90% memory reduction, 2-3x faster startup, better performance
-                          # - Required for parallel processing in chira_quantify.py and chira_extract.py (no fallback)
+                          # - Required for parallel processing in chira_quantify.py, chira_extract.py, and chira_merge.py (no fallback)
                           # - Changed from optional to required in v1.4.11
     ],
     extras_require={
