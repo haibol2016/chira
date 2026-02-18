@@ -21,6 +21,29 @@ See [CHANGELOG.md](CHANGELOG.md) for detailed change history.
 
 ## Recent Improvements
 
+### v1.4.11 (2026-02-15) - MPIRE Required Dependency
+
+**Multiprocessing Improvements:**
+- **MPIRE is now a required dependency** (previously optional):
+  - **chira_quantify.py**: MPIRE required for parallel processing (removed ProcessPoolExecutor fallback)
+    - Benefits: 50-90% memory reduction, 2-3x faster startup, shared objects for large dictionaries
+    - All parallel EM algorithm execution now uses MPIRE WorkerPool exclusively
+  - **chira_extract.py**: MPIRE required for parallel processing (removed multiprocessing.Process fallback)
+    - Converted chimera extraction to use MPIRE WorkerPool with shared objects
+    - Converted hybridization step to use MPIRE WorkerPool
+    - Benefits: 50-90% memory reduction, 2-3x faster startup, shared objects for reference dictionaries
+  - **setup.py**: Moved `mpire` from `extras_require["optional"]` to `install_requires`
+  - **Installation**: MPIRE is now automatically installed with `pip install chira`
+
+**Performance Improvements:**
+- Removed ProcessPoolExecutor/Process fallback code (simplified codebase)
+- All parallel processing now uses MPIRE with shared objects for optimal performance
+- Same logic, better performance and memory efficiency
+
+**Documentation:**
+- Updated all documentation to reflect MPIRE as a required dependency
+- Updated installation instructions and dependency lists
+
 ### v1.4.7 (2026-02-15) - Utility Script Updates & Improvements
 
 **New Features:**
@@ -192,10 +215,16 @@ docker run --rm \
 
 If you prefer to install dependencies manually:
 
-**Core Python packages:**
+**Core Python packages (required):**
 - biopython
 - bcbiogff
 - pysam
+- **mpire** (required for `chira_quantify.py` and `chira_extract.py` parallel processing)
+  - Enhanced multiprocessing framework for EM algorithm parallelization and chimera extraction
+  - Benefits: 50-90% memory reduction, 2-3x faster startup, better performance
+  - Install with: `pip install mpire` or `conda install -c conda-forge mpire`
+  - Required for parallel processing (no fallback)
+- requests (for `download_ensembl.py`)
 
 **Optional Python packages:**
 - **psutil** (highly recommended for optimal performance)
@@ -203,19 +232,18 @@ If you prefer to install dependencies manually:
   - **chira_utilities.py**: Adaptive buffer sizing (8-16MB) for 10-50x I/O performance improvement
   - Install with: `pip install psutil` or `conda install psutil`
   - Falls back to safe defaults if not available (2GB per thread for BAM sorting, 8MB buffer for I/O)
-- **mpire** (REQUIRED for `chira_quantify.py` and `chira_extract.py` parallel processing)
-  - Enhanced multiprocessing framework for EM algorithm parallelization and chimera extraction
-  - Benefits: 50-90% memory reduction, 2-3x faster startup, better performance
-  - Install with: `pip install mpire` or `conda install -c conda-forge mpire`
-  - Required for parallel processing (no fallback)
 - pyliftover (for `download_mirbase_gff3.py` coordinate liftover)
-- requests (for `download_ensembl.py`)
 
-**Optional R packages (for batchtools HPC cluster support):**
-- **batchtools** and **jsonlite** (required for `--use_batchtools` option in `chira_map.py`)
-  - Install with: `conda install -c conda-forge r-batchtools r-jsonlite`
-  - Or in R: `install.packages(c("batchtools", "jsonlite"))`
-  - See [BATCHTOOLS_USAGE.md](BATCHTOOLS_USAGE.md) for detailed usage instructions
+**R packages (for batchtools HPC cluster support):**
+- **batchtools** (required for `--use_batchtools` option in `chira_map.py`)
+  - Purpose: Submitting chunk-based batch jobs to HPC cluster schedulers (LSF, SLURM, SGE, etc.)
+  - Install with: `conda install -c conda-forge r-batchtools` or `install.packages("batchtools")` in R
+  - Benefits: Enables distributing chunk processing across multiple cluster nodes for true parallel computing
+- **jsonlite** (required for batchtools JSON configuration parsing)
+  - Purpose: Parsing JSON configuration files for batchtools job submission
+  - Install with: `conda install -c conda-forge r-jsonlite` or `install.packages("jsonlite")` in R
+  - Note: Usually installed automatically as a dependency of `batchtools`, but explicitly installing ensures compatibility
+- See [BATCHTOOLS_USAGE.md](BATCHTOOLS_USAGE.md) for detailed usage instructions
 
 **Command-line tools:**
 - bwa (recommended for alignment)
@@ -253,6 +281,12 @@ conda install -c bioconda clan  # Alternative aligner to BWA in chira_map.py
 # GNU coreutils (for parallel sort on macOS)
 # Linux: Usually pre-installed
 # macOS: brew install coreutils
+
+# R packages (for batchtools HPC cluster support, optional)
+conda install -c conda-forge r-batchtools r-jsonlite
+# Or in R:
+# R
+# > install.packages(c("batchtools", "jsonlite"))
 ```
 
 For a complete list of dependencies, see [DEPENDENCIES.md](DEPENDENCIES.md).
@@ -659,7 +693,8 @@ A split reference uses two separate reference FASTA files instead of one combine
     - Example: `--processes 8 --parallel_chunks 4` → 2 processes per chunk (too few, will auto-reduce)
   - **Note**: Only takes effect when `--chunk_fasta` is specified
 - `--use_batchtools`: Enable batchtools for HPC cluster job submission (optional, for LSF/SLURM clusters)
-  - **Requirements**: R with `batchtools` and `jsonlite` packages installed
+  - **Requirements**: R with `batchtools` and `jsonlite` R packages installed
+  - See "R packages" section above for installation instructions
   - **Benefits**: Submit chunk jobs to cluster scheduler for true parallel processing across cluster nodes
   - **Path handling**: All file paths are automatically converted to absolute paths for cluster job execution
   - **Additional parameters** (required when `--use_batchtools` is specified):

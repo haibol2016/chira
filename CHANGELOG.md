@@ -5,7 +5,7 @@ All notable changes to ChiRA will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.4.11] - 2026-02-15
+## [1.4.11] - 2026-02-17
 
 ### Changed
 - **MPIRE is now a required dependency** (previously optional):
@@ -32,10 +32,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Same logic, better performance and memory efficiency
 
 ### Documentation
-- Updated `DEPENDENCIES.md`: Moved MPIRE from optional to core dependencies
-- Updated `INSTALL.md`: MPIRE installation notes updated to reflect required status
-- Updated `README.md`: MPIRE installation instructions and version history updated
-- All documentation now reflects MPIRE as a required dependency
+- **DEPENDENCIES.md**:
+  - Moved MPIRE from optional to core dependencies
+  - Added dedicated "R Packages" section documenting `batchtools` and `jsonlite`:
+    - Clear descriptions of each R package (purpose, installation, usage)
+    - Installation instructions for both R and conda methods
+    - Notes about `jsonlite` auto-installation with `batchtools`
+    - R installation instructions (CRAN or conda)
+  - Updated "HPC Cluster Tools" section to reference new R Packages section
+  - Updated "Installation Recommendations" to reference R Packages section
+- **BATCHTOOLS_USAGE.md**:
+  - Enhanced "Prerequisites" section with separate R installation and R packages sections
+  - Added detailed descriptions of `batchtools` and `jsonlite` R packages
+  - Added installation instructions for both R and R packages (R and conda methods)
+  - Enhanced troubleshooting section with R installation guidance
+  - Clarified that batchtools and jsonlite are R packages (not Python packages)
+- **README.md**:
+  - Updated "Core Python packages" section: Moved MPIRE to required dependencies
+  - Enhanced "R packages" section with detailed documentation:
+    - Separate entries for `batchtools` and `jsonlite` with purpose and installation
+    - Installation instructions for both R and conda methods
+    - Added reference to BATCHTOOLS_USAGE.md
+  - Updated installation commands to include R packages installation
+  - Added v1.4.11 section to "Recent Improvements" documenting MPIRE changes
+  - Updated `chira_map.py` documentation to reference R packages section
+- **setup.py**:
+  - Updated MPIRE documentation: Added note about v1.4.11 change from optional to required
+  - Enhanced `requests` documentation: Listed all scripts that use it
+  - Improved batchtools/jsonlite documentation:
+    - Clarified these are R packages (not Python packages)
+    - Added separate descriptions for `batchtools` and `jsonlite`
+    - Expanded installation instructions (R base + packages)
+    - Added note about `jsonlite` auto-installation
+    - Added reference to BATCHTOOLS_USAGE.md
+- **INSTALL.md**: MPIRE installation notes updated to reflect required status
+- All documentation now consistently reflects:
+  - MPIRE as a required dependency
+  - R packages (batchtools and jsonlite) as separate from Python packages
+  - Clear installation instructions for both R and R packages
 
 ## [1.4.10] - 2026-02-15
 

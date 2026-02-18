@@ -72,7 +72,8 @@ setup(
         "mpire",          # For enhanced multiprocessing performance (chira_quantify.py, chira_extract.py)
                           # - Provides shared objects, lower overhead, and better performance than ProcessPoolExecutor/Process
                           # - Benefits: 50-90% memory reduction, 2-3x faster startup, better performance
-                          # - Required for parallel processing in chira_quantify.py and chira_extract.py
+                          # - Required for parallel processing in chira_quantify.py and chira_extract.py (no fallback)
+                          # - Changed from optional to required in v1.4.11
     ],
     extras_require={
         "optional": [
@@ -81,7 +82,8 @@ setup(
                               # - chira_map.py: Automatic memory allocation for BAM sorting, I/O bottleneck detection
                               # - chira_utilities.py: Adaptive buffer sizing (8-16MB) for 10-50x I/O performance improvement
                               # Install with: pip install psutil
-            "requests",        # For download_ensembl.py (downloading Ensembl files via HTTP/HTTPS)
+            "requests",        # For downloading files via HTTP/HTTPS
+                              # - Used in: download_ensembl.py, download_mirbase_gff3.py, download_mirbase_mature.py
             "pyliftover",      # For download_mirbase_gff3.py coordinate liftover (converting coordinates between genome versions)
         ],
         # Install all optional dependencies: pip install chira[optional]
@@ -135,14 +137,18 @@ setup(
     #   * Install: conda install -c bioconda gffread
     #
     # CLUSTER COMPUTING (for parallel processing on HPC clusters):
-    # - R with batchtools and jsonlite packages
-    #   * Used in: chira_map.py --use_batchtools (for LSF cluster job submission)
+    # - R with batchtools and jsonlite packages (R packages, not Python packages)
+    #   * Used in: chira_map.py --use_batchtools (for LSF/SLURM/SGE cluster job submission)
     #   * Enables distributing chunk processing across cluster nodes via batchtools
-    #   * Install: conda install -c conda-forge r-base r-batchtools r-jsonlite
+    #   * batchtools: Submitting chunk-based batch jobs to HPC cluster schedulers
+    #   * jsonlite: Parsing JSON configuration files for batchtools job submission
+    #   * Install R: conda install -c conda-forge r-base
+    #   * Install R packages: conda install -c conda-forge r-batchtools r-jsonlite
     #   * Or in R: install.packages(c("batchtools", "jsonlite"))
-    #   * jsonlite is required for JSON configuration file parsing
-    #   * Required only if using --use_batchtools option
+    #   * jsonlite is usually installed automatically as a dependency of batchtools
+    #   * Required only if using --use_batchtools option in chira_map.py
     #   * All file paths are automatically converted to absolute paths for cluster job execution
+    #   * See BATCHTOOLS_USAGE.md for detailed usage instructions
     #
     # Quick installation of all required tools:
     #   conda install -c bioconda bwa samtools bedtools

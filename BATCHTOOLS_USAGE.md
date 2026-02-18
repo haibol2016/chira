@@ -13,19 +13,30 @@ ChiRA supports R batchtools as a backend for submitting chunk processing jobs to
 
 ## Prerequisites
 
-1. **R installed** with `batchtools` and `jsonlite` packages:
+1. **R installed** (from [CRAN](https://cran.r-project.org/) or via conda):
+   ```bash
+   conda install -c conda-forge r-base
+   ```
+
+2. **R packages** - `batchtools` and `jsonlite` (required for batchtools functionality):
    ```r
    install.packages(c("batchtools", "jsonlite"))
    ```
-   - `jsonlite` is usually installed automatically as a dependency of `batchtools`
+   Or via conda:
+   ```bash
+   conda install -c conda-forge r-batchtools r-jsonlite
+   ```
+   - **batchtools**: Submitting chunk-based batch jobs to HPC cluster schedulers (LSF, SLURM, SGE, etc.)
+   - **jsonlite**: Parsing JSON configuration files for batchtools job submission
+   - **Note**: `jsonlite` is usually installed automatically as a dependency of `batchtools`, but explicitly installing ensures compatibility
 
-2. **LSF scheduler** available on your cluster
+3. **LSF scheduler** available on your cluster
 
-3. **Shared filesystem** accessible to all compute nodes
+4. **Shared filesystem** accessible to all compute nodes
 
-4. **Conda environment** (optional but recommended) with ChiRA dependencies
+5. **Conda environment** (optional but recommended) with ChiRA dependencies
 
-5. **Absolute paths**: All file paths are automatically converted to absolute paths for cluster job execution
+6. **Absolute paths**: All file paths are automatically converted to absolute paths for cluster job execution
    - This ensures jobs running on different cluster nodes can correctly resolve all file paths
    - No manual path conversion needed - handled automatically by the code
 
@@ -213,10 +224,21 @@ Ensure R is in your PATH:
 which Rscript
 ```
 
-Install batchtools and jsonlite if needed:
+Install R if needed:
+```bash
+conda install -c conda-forge r-base
+```
+
+Install batchtools and jsonlite R packages if needed:
 ```r
 install.packages(c("batchtools", "jsonlite"))
 ```
+Or via conda:
+```bash
+conda install -c conda-forge r-batchtools r-jsonlite
+```
+
+**Note**: These are R packages (not Python packages). They must be installed in your R environment.
 
 ### JSON Parsing Errors
 

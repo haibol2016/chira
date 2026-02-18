@@ -57,6 +57,64 @@ The following Python packages need to be installed via pip or conda:
    - Import: `import requests`
    - Purpose: Downloading files from Ensembl via HTTP/HTTPS
 
+## R Packages
+
+The following R packages are required for HPC cluster job submission via batchtools:
+
+### Core R Dependencies (for batchtools)
+
+1. **batchtools**
+   - Used in: `chira_map.py` (optional, for HPC cluster job submission)
+   - R script: `submit_chunks_batchtools.R`
+   - Purpose: Submitting chunk-based batch jobs to HPC cluster schedulers (LSF, SLURM, SGE, etc.)
+   - Installation:
+     ```r
+     install.packages("batchtools")
+     ```
+     Or via conda:
+     ```bash
+     conda install -c conda-forge r-batchtools
+     ```
+   - Note: Only required when using `--use_batchtools` option in `chira_map.py`
+   - Benefits: Enables distributing chunk processing across multiple cluster nodes for true parallel computing
+
+2. **jsonlite**
+   - Used in: `chira_map.py` (optional, for batchtools JSON configuration parsing)
+   - R script: `submit_chunks_batchtools.R`
+   - Purpose: Parsing JSON configuration files for batchtools job submission
+   - Installation:
+     ```r
+     install.packages("jsonlite")
+     ```
+     Or via conda:
+     ```bash
+     conda install -c conda-forge r-jsonlite
+     ```
+   - Note: Usually installed automatically as a dependency of `batchtools`, but explicitly installing ensures compatibility
+   - Required for: JSON configuration file parsing in batchtools submission workflow
+
+### R Installation
+
+**Install R:**
+- From [CRAN](https://cran.r-project.org/) (recommended for most systems)
+- Or via conda:
+  ```bash
+  conda install -c conda-forge r-base
+  ```
+
+**Install R packages:**
+```r
+R
+> install.packages(c("batchtools", "jsonlite"))
+```
+
+Or via conda:
+```bash
+conda install -c conda-forge r-batchtools r-jsonlite
+```
+
+**Note**: When using batchtools, ensure all file paths are absolute paths (this is handled automatically by the code). The batchtools template file path should also be absolute or use the built-in "lsf-simple" template.
+
 ## External Command-Line Tools
 
 The following command-line tools must be installed and available in the system PATH:
@@ -115,18 +173,7 @@ The following command-line tools must be installed and available in the system P
 
 ### HPC Cluster Tools
 
-10. **R with batchtools package**
-    - Used in: `chira_map.py` (optional, for HPC cluster job submission)
-    - R script: `submit_chunks_batchtools.R`
-    - Purpose: Submitting chunk-based batch jobs to HPC cluster schedulers (LSF, SLURM, etc.)
-    - Note: Only required when using `--use_batchtools` option in `chira_map.py`
-    - Installation: Install R and the batchtools package:
-      ```r
-      install.packages("batchtools")
-      ```
-    - Dependencies: Requires `jsonlite` R package (usually installed automatically with batchtools)
-
-11. **LSF (Load Sharing Facility) cluster scheduler**
+10. **LSF (Load Sharing Facility) cluster scheduler**
     - Used in: `chira_map.py` (optional, for HPC cluster job submission)
     - Commands: `bsub`, `bjobs`, `bqueues`
     - Purpose: Job submission and management on LSF-managed HPC clusters
@@ -178,20 +225,8 @@ conda install -c bioconda bwa samtools bedtools intarna
 
 For CLAN and blockbuster, please refer to their respective documentation for installation instructions.
 
-**R with batchtools** (for HPC cluster job submission):
-- Install R from [CRAN](https://cran.r-project.org/) or via conda:
-  ```bash
-  conda install -c conda-forge r-base
-  ```
-- Install batchtools and jsonlite R packages:
-  ```r
-  R
-  > install.packages(c("batchtools", "jsonlite"))
-  ```
-- Or via conda:
-  ```bash
-  conda install -c conda-forge r-batchtools r-jsonlite
-  ```
+**R packages** (for HPC cluster job submission via batchtools):
+- See the "R Packages" section above for detailed installation instructions
 - **LSF cluster scheduler**: Usually pre-installed on HPC clusters. Contact your cluster administrator for access and queue information.
 - **Note**: When using batchtools, ensure all file paths are absolute paths (this is handled automatically by the code). The batchtools template file path should also be absolute or use the built-in "lsf-simple" template.
 
