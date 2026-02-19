@@ -710,9 +710,26 @@ def merge_loci_overlap(outdir, alignment_overlap_fraction, min_locus_size, num_p
         chunk_args = [(chunk_transcripts, alignment_overlap_fraction, min_locus_size)
                       for chunk_transcripts in chunks]
         
+        # Determine start method: use 'fork' for copy-on-write on Unix systems, default on Windows
+        # 'fork' provides copy-on-write semantics: shared objects only copied when modified
+        # This is the most memory-efficient option when available (50-90% memory reduction)
+        # Reference: https://sybrenjansen.github.io/mpire/master/usage/workerpool/shared_objects.html
+        try:
+            if sys.platform != 'win32':
+                current_method = multiprocessing.get_start_method(allow_none=True)
+                if current_method != 'spawn':
+                    start_method = 'fork'
+                else:
+                    start_method = None
+            else:
+                start_method = None
+        except (AttributeError, ValueError):
+            start_method = 'fork' if sys.platform != 'win32' else None
+        
         # Process chunks in parallel using MPIRE WorkerPool
         print(str(datetime.datetime.now()), f"Processing {num_transcripts} transcripts in {len(chunk_args)} chunks using {num_processes} processes")
-        with WorkerPool(n_jobs=num_processes, shared_objects=shared_objects_dict) as pool:
+        with WorkerPool(n_jobs=num_processes, shared_objects=shared_objects_dict, 
+                       start_method=start_method) as pool:
             chunk_results = pool.map(_process_transcript_chunk_overlap, chunk_args, progress_bar=False)
         
         # Flatten results: chunk_results is a list of lists of (transcript, output_lines) tuples
@@ -877,9 +894,26 @@ def merge_loci_blockbuster(outdir, distance, min_cluster_height, min_block_heigh
         chunk_args = [(chunk_transcripts, alignment_overlap_fraction)
                       for chunk_transcripts in chunks]
         
+        # Determine start method: use 'fork' for copy-on-write on Unix systems, default on Windows
+        # 'fork' provides copy-on-write semantics: shared objects only copied when modified
+        # This is the most memory-efficient option when available (50-90% memory reduction)
+        # Reference: https://sybrenjansen.github.io/mpire/master/usage/workerpool/shared_objects.html
+        try:
+            if sys.platform != 'win32':
+                current_method = multiprocessing.get_start_method(allow_none=True)
+                if current_method != 'spawn':
+                    start_method = 'fork'
+                else:
+                    start_method = None
+            else:
+                start_method = None
+        except (AttributeError, ValueError):
+            start_method = 'fork' if sys.platform != 'win32' else None
+        
         # Process chunks in parallel using MPIRE WorkerPool
         print(str(datetime.datetime.now()), f"Processing {num_transcripts} transcripts in {len(chunk_args)} chunks using {num_processes} processes")
-        with WorkerPool(n_jobs=num_processes, shared_objects=shared_objects_dict) as pool:
+        with WorkerPool(n_jobs=num_processes, shared_objects=shared_objects_dict, 
+                       start_method=start_method) as pool:
             chunk_results = pool.map(_process_transcript_chunk_blockbuster, chunk_args, progress_bar=False)
         
         # Flatten results: chunk_results is a list of lists of (transcript, t_merged) tuples

@@ -548,7 +548,25 @@ def em(d_alpha, d_rho, library_size, l_multimap_readids, em_threshold, num_proce
                 d_alpha_chunk = {readid: d_alpha[readid].copy() for readid in chunk}
                 chunk_args.append((chunk, d_alpha_chunk))
             
-            with WorkerPool(n_jobs=num_processes, shared_objects=shared_objects_dict) as pool:
+            # Determine start method: use 'fork' for copy-on-write on Unix systems, default on Windows
+            # 'fork' provides copy-on-write semantics: shared objects only copied when modified
+            # This is the most memory-efficient option when available (50-90% memory reduction)
+            # Reference: https://sybrenjansen.github.io/mpire/master/usage/workerpool/shared_objects.html
+            import multiprocessing
+            try:
+                if sys.platform != 'win32':
+                    current_method = multiprocessing.get_start_method(allow_none=True)
+                    if current_method != 'spawn':
+                        start_method = 'fork'
+                    else:
+                        start_method = None
+                else:
+                    start_method = None
+            except (AttributeError, ValueError):
+                start_method = 'fork' if sys.platform != 'win32' else None
+            
+            with WorkerPool(n_jobs=num_processes, shared_objects=shared_objects_dict, 
+                          start_method=start_method) as pool:
                 results = pool.map(_process_reads_chunk_e_step, chunk_args, progress_bar=False)
                 # Collect updated values and merge back into d_alpha
                 for d_alpha_updated in results:

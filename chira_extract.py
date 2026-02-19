@@ -1277,75 +1277,99 @@ def run_chimera_extraction(args, d_reflen1, d_reflen2, tpm_cutoff_value, no_of_r
     """
     print(str(datetime.datetime.now()), " START: multiprocessing")
     
-    # Prepare chunk arguments
+    # Prepare chunk arguments as tuples (not dictionaries) to avoid MPIRE unpacking issues
+    # MPIRE will unpack dictionaries as keyword arguments, causing TypeError
+    # Using tuples ensures arguments are passed as positional arguments
     chunk_args = []
     for k in range(args.processes):
         s = k * math.ceil(no_of_reads / args.processes)
         e = min(s + math.floor(no_of_reads / args.processes), no_of_reads)
         print(k, s, e, no_of_reads)
-        chunk_args.append({
-            'chunk_start': s,
-            'chunk_end': e,
-            'total_read_count': no_of_reads,
-            'hybridize': args.hybridize,
-            'chimeric_overlap': args.chimeric_overlap,
-            'f_gtf': args.f_gtf,
-            'outdir': args.outdir,
-            'crl_file': args.crl_file,
-            'tpm_threshold': tpm_cutoff_value,
-            'score_cutoff': args.score_cutoff,
-            'n': str(k),
-            'sample_name': args.sample_name,
-            'compress': args.compress
-        })
+        chunk_args.append((
+            s,  # chunk_start
+            e,  # chunk_end
+            no_of_reads,  # total_read_count
+            args.hybridize,  # hybridize
+            args.chimeric_overlap,  # chimeric_overlap
+            args.f_gtf,  # f_gtf
+            args.outdir,  # outdir
+            args.crl_file,  # crl_file
+            tpm_cutoff_value,  # tpm_threshold
+            args.score_cutoff,  # score_cutoff
+            str(k),  # n
+            args.sample_name,  # sample_name
+            args.compress  # compress
+        ))
     
     # OPTIMIZATION: Use MPIRE with shared objects for better performance
     # Shared objects reduce memory overhead by 50-90% for large datasets
     # d_ref_lengths1 and d_ref_lengths2 are shared in memory instead of pickled per process
     # Pass shared objects directly to WorkerPool (MPIRE 2.10.1+)
     # Shared objects are passed as first argument to worker functions
+    # Use 'fork' start method for copy-on-write (most memory efficient) when available
+    # On Windows, fall back to default start method (spawn/forkserver)
     shared_objects_dict = {
         'd_ref_lengths1': d_reflen1,
         'd_ref_lengths2': d_reflen2
     }
     
-    def process_chunk(shared_objects, chunk_data_tuple):
+    def process_chunk(shared_objects, chunk_start, chunk_end, total_read_count, hybridize,
+                     chimeric_overlap, f_gtf, outdir, crl_file, tpm_threshold, score_cutoff,
+                     n, sample_name, compress):
         """Wrapper function to process a chunk with shared objects.
         
         Args:
             shared_objects: Dictionary of shared objects (MPIRE) - passed as first arg by MPIRE
                 - d_ref_lengths1: Dictionary of reference lengths for first priority reference
                 - d_ref_lengths2: Dictionary of reference lengths for second priority reference
-            chunk_data_tuple: Tuple containing a single dictionary with chunk processing parameters
+            chunk_start, chunk_end, total_read_count, hybridize, chimeric_overlap, f_gtf,
+            outdir, crl_file, tpm_threshold, score_cutoff, n, sample_name, compress:
+                Chunk processing parameters passed as positional arguments
         """
-        # Unpack the tuple to get the chunk_data dictionary
-        chunk_data = chunk_data_tuple[0]
         return write_chimeras(
-            chunk_data['chunk_start'],
-            chunk_data['chunk_end'],
-            chunk_data['total_read_count'],
+            chunk_start,
+            chunk_end,
+            total_read_count,
             None,  # d_ref_lengths1 - will use shared object
             None,  # d_ref_lengths2 - will use shared object
-            chunk_data['hybridize'],
-            chunk_data['chimeric_overlap'],
-            chunk_data['f_gtf'],
-            chunk_data['outdir'],
-            chunk_data['crl_file'],
-            chunk_data['tpm_threshold'],
-            chunk_data['score_cutoff'],
-            chunk_data['n'],
-            chunk_data['sample_name'],
-            chunk_data['compress'],
+            hybridize,
+            chimeric_overlap,
+            f_gtf,
+            outdir,
+            crl_file,
+            tpm_threshold,
+            score_cutoff,
+            n,
+            sample_name,
+            compress,
             shared_objects=shared_objects
         )
     
-    # BUGFIX: Wrap dictionaries in tuples to prevent MPIRE from unpacking them as keyword arguments
-    # MPIRE's map() function will unpack dictionaries if passed directly, causing TypeError
-    # Wrapping in tuples ensures chunk_data is passed as a single positional argument
-    chunk_args_tuples = [(chunk_data,) for chunk_data in chunk_args]
+    # Determine start method: use 'fork' for copy-on-write on Unix systems, default on Windows
+    # 'fork' provides copy-on-write semantics: shared objects only copied when modified
+    # This is the most memory-efficient option when available (50-90% memory reduction)
+    # Reference: https://sybrenjansen.github.io/mpire/master/usage/workerpool/shared_objects.html
+    import multiprocessing
+    # Use 'fork' if available (Unix/Linux), otherwise use default (spawn/forkserver on Windows)
+    # fork is not available on Windows, so we check platform and start method
+    try:
+        # Check if fork is available (Unix/Linux systems)
+        if sys.platform != 'win32':
+            # Try to get current start method - if it's already set to spawn, don't override
+            current_method = multiprocessing.get_start_method(allow_none=True)
+            if current_method != 'spawn':
+                start_method = 'fork'
+            else:
+                start_method = None  # Use default (spawn)
+        else:
+            start_method = None  # Windows doesn't support fork
+    except (AttributeError, ValueError):
+        # Fallback if get_start_method is not available or raises error
+        start_method = 'fork' if sys.platform != 'win32' else None
     
-    with WorkerPool(n_jobs=args.processes, shared_objects=shared_objects_dict) as pool:
-        pool.map(process_chunk, chunk_args_tuples, progress_bar=False)
+    with WorkerPool(n_jobs=args.processes, shared_objects=shared_objects_dict, 
+                    start_method=start_method) as pool:
+        pool.map(process_chunk, chunk_args, progress_bar=False)
 
 
 def prepare_reference_file(args):
@@ -1407,24 +1431,25 @@ def run_hybridization(args):
     common_intarna_params = build_intarna_params(args)
     
     # Run hybridization in parallel using MPIRE
+    # Use tuples instead of dictionaries to avoid MPIRE unpacking issues
     hybridization_args = []
     for k in range(args.processes):
-        hybridization_args.append({
-            'outdir': args.outdir,
-            'intarna_params': common_intarna_params,
-            'n': str(k),
-            'sample_name': args.sample_name,
-            'compress': args.compress
-        })
+        hybridization_args.append((
+            args.outdir,  # outdir
+            common_intarna_params,  # intarna_params
+            str(k),  # n
+            args.sample_name,  # sample_name
+            args.compress  # compress
+        ))
     
-    def process_hybridization(chunk_data):
+    def process_hybridization(outdir, intarna_params, n, sample_name, compress):
         """Wrapper function to process hybridization with MPIRE."""
         return hybridize_and_write(
-            chunk_data['outdir'],
-            chunk_data['intarna_params'],
-            chunk_data['n'],
-            chunk_data['sample_name'],
-            chunk_data['compress']
+            outdir,
+            intarna_params,
+            n,
+            sample_name,
+            compress
         )
     
     with WorkerPool(n_jobs=args.processes) as pool:
