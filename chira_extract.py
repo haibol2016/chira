@@ -1309,15 +1309,17 @@ def run_chimera_extraction(args, d_reflen1, d_reflen2, tpm_cutoff_value, no_of_r
         'd_ref_lengths2': d_reflen2
     }
     
-    def process_chunk(shared_objects, chunk_data):
+    def process_chunk(shared_objects, chunk_data_tuple):
         """Wrapper function to process a chunk with shared objects.
         
         Args:
             shared_objects: Dictionary of shared objects (MPIRE) - passed as first arg by MPIRE
                 - d_ref_lengths1: Dictionary of reference lengths for first priority reference
                 - d_ref_lengths2: Dictionary of reference lengths for second priority reference
-            chunk_data: Dictionary containing chunk processing parameters
+            chunk_data_tuple: Tuple containing a single dictionary with chunk processing parameters
         """
+        # Unpack the tuple to get the chunk_data dictionary
+        chunk_data = chunk_data_tuple[0]
         return write_chimeras(
             chunk_data['chunk_start'],
             chunk_data['chunk_end'],
@@ -1337,8 +1339,13 @@ def run_chimera_extraction(args, d_reflen1, d_reflen2, tpm_cutoff_value, no_of_r
             shared_objects=shared_objects
         )
     
+    # BUGFIX: Wrap dictionaries in tuples to prevent MPIRE from unpacking them as keyword arguments
+    # MPIRE's map() function will unpack dictionaries if passed directly, causing TypeError
+    # Wrapping in tuples ensures chunk_data is passed as a single positional argument
+    chunk_args_tuples = [(chunk_data,) for chunk_data in chunk_args]
+    
     with WorkerPool(n_jobs=args.processes, shared_objects=shared_objects_dict) as pool:
-        pool.map(process_chunk, chunk_args, progress_bar=False)
+        pool.map(process_chunk, chunk_args_tuples, progress_bar=False)
 
 
 def prepare_reference_file(args):
