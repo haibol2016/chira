@@ -7,7 +7,7 @@ ChiRA is a set of tools to analyze RNA-RNA interactome experimental data such as
 **Note**: This is a modified version of ChiRA (based on v1.4.3) with significant performance optimizations and new features. The original code is licensed under GPL v3, and this modified version maintains the same license. All changes are documented in the "Recent Improvements" section below and in [CHANGELOG.md](CHANGELOG.md).
 
 ## Version History
-- **v1.4.11** (Current, 2026-02-15): MPIRE made required dependency for optimal multiprocessing performance, removed fallback code, improved memory efficiency (50-90% reduction) and startup time (2-3x faster)
+- **v1.4.11** (Current, 2026-02-17): MPIRE made required dependency for optimal multiprocessing performance, removed fallback code, improved memory efficiency (50-90% reduction) and startup time (2-3x faster)
 - **v1.4.10** (2026-02-15): Fixed batchtools submission issues (template path handling, JSON parsing), ensured all paths are absolute for cluster jobs, and refactored scripts for better code organization
 - **v1.4.9** (2026-02-15): Added `--parallel_chunks` parameter for configurable chunk parallelism in chira_map.py
 - **v1.4.8** (2026-02-15): Improved chunk-based parallelization for very large transcript counts (e.g., human genome with 387K+ transcripts), variable naming consistency improvements, and bug fixes in chira_merge.py
@@ -21,7 +21,7 @@ See [CHANGELOG.md](CHANGELOG.md) for detailed change history.
 
 ## Recent Improvements
 
-### v1.4.11 (2026-02-15) - MPIRE Required Dependency
+### v1.4.11 (2026-02-17) - MPIRE Required Dependency
 
 **Multiprocessing Improvements:**
 - **MPIRE is now a required dependency** (previously optional):
