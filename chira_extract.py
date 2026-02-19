@@ -300,11 +300,15 @@ def filter_alignments(lines, tpm_threshold, score_cutoff):
     for line in lines:
         f = line.rstrip('\n').split('\t')
         crl_tpm = f[12]
-        prob = f[10]
-        locusshare = f[11]
+        # Correct field indices based on loci.counts header:
+        # Column 10: locus_share (fraction of reads in CRL that map to this locus)
+        # Column 11: read_crl_fraction (EM-optimized probability that read belongs to this CRL)
+        # Column 12: crl_tpm (TPM value for the CRL)
+        locus_share = f[10]
+        read_crl_fraction = f[11]
         if float(crl_tpm) < tpm_threshold:
             continue
-        locus_score = float(prob) * float(locusshare)
+        locus_score = float(read_crl_fraction) * float(locus_share)
         if locus_score < score_cutoff:
             continue
         l_read_aligns.append(line)
@@ -322,16 +326,20 @@ def parse_alignment_line(alignment_line):
     fields = alignment_line.rstrip('\n').split('\t')
     if len(fields) < 13:
         return None
+    # BUGFIX: Field indices must match correct loci.counts header format
+    # Column 10: locus_share (fraction of reads in CRL that map to this locus)
+    # Column 11: read_crl_fraction (EM-optimized probability that read belongs to this CRL)
+    # Column 12: crl_tpm (TPM value for the CRL)
     # OPTIMIZATION: Convert numeric fields once to avoid repeated float() calls
     # Cache float values to avoid repeated conversions in extract_and_write()
     try:
-        locusshare_float = float(fields[10])
-        prob_float = float(fields[11])
-        tpm_float = float(fields[12])
+        locus_share_float = float(fields[10])      # Field 10: locus_share
+        read_crl_fraction_float = float(fields[11]) # Field 11: read_crl_fraction (EM-optimized probability)
+        tpm_float = float(fields[12])               # Field 12: crl_tpm
     except (ValueError, IndexError):
-        # Fallback to string if conversion fails
-        locusshare_float = 0.0
-        prob_float = 0.0
+        # Fallback: set to 0.0 if conversion fails
+        locus_share_float = 0.0
+        read_crl_fraction_float = 0.0
         tpm_float = 0.0
     
     return {
@@ -345,11 +353,17 @@ def parse_alignment_line(alignment_line):
         'cigar': fields[7],
         'genomic_pos': fields[8],
         'locuspos': fields[9],
-        'locusshare': fields[10],  # Keep string for compatibility
-        'locusshare_float': locusshare_float,  # Cached float value
-        'prob': fields[11],  # Keep string for compatibility
-        'prob_float': prob_float,  # Cached float value
-        'tpm': fields[12],  # Keep string for compatibility
+        'locus_share': fields[10],  # Field 10: locus_share
+        'locus_share_float': locus_share_float,  # Cached float value
+        'read_crl_fraction': fields[11],  # Field 11: read_crl_fraction (EM-optimized probability)
+        'read_crl_fraction_float': read_crl_fraction_float,  # Cached float value
+        # Keep 'prob' and 'prob_float' as aliases for backward compatibility in code
+        'prob': fields[11],  # Alias: read_crl_fraction is the probability
+        'prob_float': read_crl_fraction_float,  # Alias: cached float value
+        # Keep 'locusshare' and 'locusshare_float' as aliases for backward compatibility
+        'locusshare': fields[10],  # Alias: locus_share
+        'locusshare_float': locus_share_float,  # Alias: cached float value
+        'tpm': fields[12],  # Field 12: crl_tpm
         'tpm_float': tpm_float,  # Cached float value
         'raw_line': alignment_line  # Keep original for compatibility if needed
     }
@@ -376,15 +390,15 @@ def extract_and_write(readid, l_read_alignments, l_loci_bed, d_ref_lengths1, d_r
             alignment_to_parsed[alignment] = parsed
     
     # OPTIMIZATION: Pre-filter alignments before generating pairs to reduce O(n²) combinations
-    # Filter out alignments with prob == 0 early, as they will never form valid chimeras
+    # Filter out alignments with read_crl_fraction == 0 early, as they will never form valid chimeras
     # This dramatically reduces the number of pairs generated, especially for reads with many alignments
-    # Example: 20 alignments with 5 having prob==0: 190 pairs -> 105 pairs (45% reduction)
+    # Example: 20 alignments with 5 having read_crl_fraction==0: 190 pairs -> 105 pairs (45% reduction)
     # Use parsed structures for filtering (faster than re-parsing)
     filtered_alignments = []
     for parsed in parsed_alignments:
-        # Only keep alignments with non-zero probability
+        # Only keep alignments with non-zero read_crl_fraction (EM-optimized probability)
         # Use cached float value if available, otherwise parse once
-        prob_float = parsed.get('prob_float', float(parsed['prob']))
+        prob_float = parsed.get('prob_float', float(parsed['prob']))  # prob_float is alias for read_crl_fraction_float
         if prob_float != 0:
             # Get original alignment string from parsed dict (stored as 'raw_line')
             filtered_alignments.append(parsed['raw_line'])
@@ -411,8 +425,7 @@ def extract_and_write(readid, l_read_alignments, l_loci_bed, d_ref_lengths1, d_r
         genomic_pos1 = p1['genomic_pos']
         locuspos1 = p1['locuspos']
         locusshare1 = p1['locusshare']
-        prob1 = p1['prob']
-        tpm1 = p1['tpm']
+        # prob1, tpm1 not needed - we use prob1_float, tpm1_float instead
         
         segmentid2 = p2['segmentid']
         transcriptid2 = p2['transcriptid']
@@ -425,11 +438,9 @@ def extract_and_write(readid, l_read_alignments, l_loci_bed, d_ref_lengths1, d_r
         genomic_pos2 = p2['genomic_pos']
         locuspos2 = p2['locuspos']
         locusshare2 = p2['locusshare']
-        prob2 = p2['prob']
-        tpm2 = p2['tpm']
+        # prob2, tpm2 not needed - we use prob2_float, tpm2_float instead
         
         # these are multimappings of the same segment
-        # Note: prob == 0 check is no longer needed here since we pre-filtered, but keeping for safety
         if segmentid1 == segmentid2 or locuspos1 == locuspos2 or crlid1 == crlid2:
             continue
         # check these are chimeric arms
@@ -468,8 +479,7 @@ def extract_and_write(readid, l_read_alignments, l_loci_bed, d_ref_lengths1, d_r
             genomic_pos1 = p1['genomic_pos']
             locuspos1 = p1['locuspos']
             locusshare1 = p1['locusshare']
-            prob1 = p1['prob']
-            tpm1 = p1['tpm']
+            # prob1, tpm1 not needed - we use prob1_float, tpm1_float instead
             
             segmentid2 = p2['segmentid']
             transcriptid2 = p2['transcriptid']
@@ -482,18 +492,24 @@ def extract_and_write(readid, l_read_alignments, l_loci_bed, d_ref_lengths1, d_r
             genomic_pos2 = p2['genomic_pos']
             locuspos2 = p2['locuspos']
             locusshare2 = p2['locusshare']
-            prob2 = p2['prob']
-            tpm2 = p2['tpm']
+            # prob2, tpm2 not needed - we use prob2_float, tpm2_float instead
         # OPTIMIZATION: Use cached float values instead of repeated conversions
         # Parse once in parse_alignment_line(), reuse cached values here
         # Match original behavior: float("{:.2f}".format(float(prob))) 
         # Using round() produces equivalent results but is more efficient
-        prob1_float = p1.get('prob_float', float(p1['prob']))
-        prob2_float = p2.get('prob_float', float(p2['prob']))
+        # Note: prob_float is alias for read_crl_fraction_float (EM-optimized probability)
+        prob1_float = p1.get('prob_float', float(p1['prob']))  # read_crl_fraction for alignment 1
+        prob2_float = p2.get('prob_float', float(p2['prob']))  # read_crl_fraction for alignment 2
+        # Safety check: ensure read_crl_fraction != 0 (should already be filtered by pre-filtering, but defensive check)
+        # Original code checked prob == 0 here; pre-filtering optimization moved it earlier for performance
+        # This check ensures we don't process pairs with read_crl_fraction == 0 even if pre-filtering missed them
+        if prob1_float == 0 or prob2_float == 0:
+            continue
+        # For chimeras, use read_crl_fraction directly as the score (not multiplied by locus_share)
         # Original: first_locus_score = float("{:.2f}".format(float(prob1)))
         # Equivalent: round to 2 decimal places (produces same result)
-        first_locus_score = round(prob1_float, 2)
-        second_locus_score = round(prob2_float, 2)
+        first_locus_score = round(prob1_float, 2)  # read_crl_fraction for alignment 1
+        second_locus_score = round(prob2_float, 2)  # read_crl_fraction for alignment 2
         combined_score = first_locus_score * second_locus_score
         
         # OPTIMIZATION: Use cached float values and f-strings for formatting
@@ -581,8 +597,7 @@ def extract_and_write(readid, l_read_alignments, l_loci_bed, d_ref_lengths1, d_r
             genomic_pos = p['genomic_pos']
             locuspos = p['locuspos']
             locusshare = p['locusshare']
-            prob = p['prob']
-            tpm = p['tpm']
+            # prob, tpm not needed - we use prob_float, tpm_float instead
 
             geneid, name, region, tx_len = extract_annotations(transcriptid,
                                                                genomic_pos,
@@ -590,9 +605,11 @@ def extract_and_write(readid, l_read_alignments, l_loci_bed, d_ref_lengths1, d_r
                                                                f_gtf)
 
             # OPTIMIZATION: Use cached float values instead of repeated conversions
-            prob_float = p.get('prob_float', float(prob))
-            locusshare_float = p.get('locusshare_float', float(locusshare))
-            tpm_float = p.get('tpm_float', float(tpm))
+            # Note: prob_float is alias for read_crl_fraction_float, locusshare_float is alias for locus_share_float
+            prob_float = p.get('prob_float', float(p['prob']))  # read_crl_fraction (EM-optimized probability)
+            locusshare_float = p.get('locusshare_float', float(locusshare))  # locus_share
+            tpm_float = p.get('tpm_float', float(p['tpm']))
+            # For singletons, use read_crl_fraction * locus_share as the alignment score
             locus_score = f"{(prob_float * locusshare_float):.2f}"
             tpm = f"{tpm_float:.2f}"
 
@@ -1061,19 +1078,16 @@ def merge_files(inprefix, outfile, header, r, compress=False):
             os.remove(temp_file)
 
 
+# This modified function is used to find the end position of the hybridization
 def hybridization_positions(dotbracket1, dotbracket2):
     end1 = -1
     end2 = -1
     for i in range(len(dotbracket1)):
         if dotbracket1[i] == '(':
             end1 = i + 1
-            dotbracket1[i] = "."
-            # Iterate backward through dotbracket2 to find last ')' in original
-            for j in range(len(dotbracket2) - 1, -1, -1):
-                if dotbracket2[j] == ')':
-                    end2 = j + 1
-                    dotbracket2[j] = '.'
-                    break
+    for j in range(len(dotbracket2)):
+        if dotbracket2[j] == ')':
+            end2 = j + 1
     return end1, end2
 
 
@@ -1100,10 +1114,11 @@ def write_interaction_summary(outdir, sample_name, compress=False, num_threads=4
         next(fh_in)
         for line in fh_in:
             f = line.rstrip("\n").split("\t")
-            (readid, ref1, ref2, region1, region2, locus1, locus2, tpm1, tpm2, score1, score2) = (f[0], f[1], f[2],
-                                                                                                  f[7], f[8], f[20],
-                                                                                                  f[21], f[24], f[25],
-                                                                                                  f[26], f[27])
+            (readid, ref1, ref2, region1, region2, 
+            locus1, locus2, tpm1, tpm2, score1, score2) = (f[0], f[1], f[2],
+                                                            f[7], f[8], f[20],
+                                                            f[21], f[24], f[25],
+                                                            f[26], f[27])
             tpm = str(float(tpm1) + float(tpm2))
             score = str(float(score1) * float(score2))
             sequence1 = sequence2 = "NA"
@@ -1129,20 +1144,18 @@ def write_interaction_summary(outdir, sample_name, compress=False, num_threads=4
                 # decrease by 1 before adding to the reference start
                 hybrid_start1 = int(hybrid_start_pos.split("&")[0]) - 1
                 hybrid_start2 = int(hybrid_start_pos.split("&")[1]) - 1
-                hybridization_pos1 = "\t".join([refid1, str(int(ref_start1) + hybrid_start1),
-                                                str(int(ref_start1) + hybrid_end1), ref_strand1])
-                hybridization_pos2 = "\t".join([refid2, str(int(ref_start2) + hybrid_start2),
-                                               str(int(ref_start2) + hybrid_end2), ref_strand2])
+                hybridization_pos1 = f'{refid1}:{int(ref_start1) + hybrid_start1}-{int(ref_start1) + hybrid_end1}:{ref_strand1}'
+                hybridization_pos2 = f'{refid2}:{int(ref_start2) + hybrid_start2}-{int(ref_start2) + hybrid_end2}:{ref_strand2}'
                 hybridized_sequence1 = sequence1[hybrid_start1:hybrid_end1]
                 hybridized_sequence2 = sequence2[hybrid_start2:hybrid_end2]
 
-                hybridization_pos = hybridization_pos1 + "\t" + hybridization_pos2
-                hybridized_sequences = hybridized_sequence1 + "\t" + hybridized_sequence2
+                hybridization_pos = hybridization_pos1 + '&' + hybridization_pos2
+                hybridized_sequences = hybridized_sequence1 + '&' + hybridized_sequence2
 
                 if interaction_otherway in d_interactions:
                     hybrid_start_pos = f[31].split('&')[1] + '&' + f[31].split('&')[0]
-                    hybridization_pos = hybridization_pos2 + "\t" + hybridization_pos1
-                    hybridized_sequences = hybridized_sequence2 + "\t" + hybridized_sequence1
+                    hybridization_pos = hybridization_pos2 + '&' + hybridization_pos1
+                    hybridized_sequences = hybridized_sequence2 + '&' + hybridized_sequence1
                     target_dotbracket = dotbracket.split("&")[0].replace("(", ")")
                     query_dotbracket = dotbracket.split("&")[1].replace(")", "(")
                     dotbracket = query_dotbracket + "&" + target_dotbracket
@@ -1176,7 +1189,7 @@ def write_interaction_summary(outdir, sample_name, compress=False, num_threads=4
         "locus_2_chromosome", "locus_2_start", "locus_2_end", "locus_2_strand",
         "locus_1_sequence", "locus_2_sequence", "hybridization_structure_dotbracket",
         "hybridization_mfe_kcal_mol", "hybridized_sequence_segments",
-        "hybridization_start_positions", "hybridization_genomic_coordinates",
+        "hybridization_start_positions","hybridization_genomic_coordinates",
         "tpm_locus_1", "tpm_locus_2", "tpm_combined",
         "alignment_score_locus_1", "alignment_score_locus_2", "combined_alignment_score",
         "annotation_region_locus_1", "annotation_region_locus_2",

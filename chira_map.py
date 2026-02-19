@@ -230,10 +230,13 @@ def write_mapped_bed(bam, bed, fasta, stranded):
             if alignment.is_unmapped:
                 continue
             
-            # For stranded RNA-seq: if primary is on wrong strand, it's invalid and shouldn't be used as quality threshold
-            # Only use primary length as threshold if it's on the desired strand
+            # Use maximum length from correct-strand alignments only
+            # This is biologically more appropriate for chimeric RNA-seq analysis:
+            # - Wrong-strand alignments are artifacts and shouldn't influence quality thresholds
+            # - Quality comparisons should be fair (correct-strand vs correct-strand)
+            # - Maximizes capture of genuine chimeric interactions
             # Write the alignment only if it mapped on desired strand
-            # NOTE: In original code, prev_unmapped = False is only set for desired-strand alignments
+            # NOTE: prev_unmapped = False is only set for desired-strand alignments
             # Wrong-strand mapped reads are treated as unmapped (go to unmapped FASTA)
             optimal_alignment_len = 0
             if is_desired_strand:
@@ -253,7 +256,9 @@ def write_mapped_bed(bam, bed, fasta, stranded):
             alt_alignments = alignment.get_tag('XA').rstrip(';').split(';')
             
             # Two passes are needed: we must find optimal alignment length before filtering
-            # First pass: lightweight - only find optimal length (no storage)
+            # First pass: lightweight - only find optimal length from correct-strand alternates
+            # This ensures optimal_alignment_len is set even if primary was wrong-strand
+            # Original comment: "either optimal_alignment_len already set or there must be at least a secondary alignment on desired strand"
             for alt_alignment in alt_alignments:
                 # BWA XA tag format: refname,strand+start,cigar,nm
                 f_alt_align = alt_alignment.split(',')
@@ -267,10 +272,13 @@ def write_mapped_bed(bam, bed, fasta, stranded):
                 alt_alignment_len = chira_utilities.alignment_length(alt_cigar)
                 
                 # Track optimal length (only from alternates on desired strand)
+                # This sets optimal_alignment_len if primary was wrong-strand, or increases it if alternates are longer
                 if alt_alignment_len > optimal_alignment_len:
                     optimal_alignment_len = alt_alignment_len
             
             # Second pass: parse and write only alignments that meet the optimal length threshold
+            # Only process if we found at least one valid correct-strand alignment (optimal_alignment_len > 0)
+            # This ensures we don't write anything if all alignments are wrong-strand
             if optimal_alignment_len > 0:
                 for alt_alignment in alt_alignments:
                     # BWA XA tag format: refname,strand+start,cigar,nm

@@ -179,7 +179,10 @@ def build_crls(build_crls_too, bed, merged_bed, crl_file, crl_share_cutoff, min_
                 # Get CRLs that contain this read
                 for crlid in d_read_to_crls.get(read_id, set()):
                     # Only consider CRLs that are still valid and have similar size
-                    if crlid < len(d_crl_reads):
+                    # BUGFIX: Check if crlid exists in dictionary instead of comparing to length
+                    # The original check "crlid < len(d_crl_reads)" assumed sequential CRL IDs,
+                    # but this can incorrectly filter out valid CRLs if IDs are not sequential
+                    if crlid in d_crl_reads:
                         crl_size = len(d_crl_reads[crlid])
                         if lower_bound <= crl_size <= upper_bound:
                             candidate_crl_ids.add(crlid)
@@ -218,7 +221,9 @@ def build_crls(build_crls_too, bed, merged_bed, crl_file, crl_share_cutoff, min_
                 # OPTIMIZATION: Update inverted index as CRLs are created/modified
                 # This allows subsequent loci to benefit from the index
                 # Track which reads are new to this CRL
-                old_crl_reads = d_crl_reads[matched_crl].copy() if matched_crl < len(d_crl_reads) else set()
+                # BUGFIX: Check if CRL exists in dictionary instead of comparing to length
+                # This is more robust and doesn't assume sequential CRL IDs
+                old_crl_reads = d_crl_reads[matched_crl].copy() if matched_crl in d_crl_reads else set()
                 d_crl_reads[matched_crl].update(l_locusreads)  # Use set.update() instead of extend()
                 # Update index: add new reads to the index for this CRL
                 for read_id in l_locusreads:
@@ -713,7 +718,8 @@ def quantify_crls(crl_file, em_threshold, num_processes=1):
         for crlid in d_rho:
             d_rho[crlid] = 0.0
 
-    d_res = em(d_alpha, d_rho, library_size, l_multimap_readids, em_threshold, num_processes)
+    d_res = em(d_alpha, d_rho, library_size, l_multimap_readids, 
+              em_threshold, num_processes)
 
     d_crl_expression = defaultdict(float)
     # OPTIMIZATION: Use .items() for more efficient dictionary iteration
@@ -724,7 +730,10 @@ def quantify_crls(crl_file, em_threshold, num_processes=1):
 
     d_crl_tpm = tpm(d_crl_expression, d_crl_loci_len)
 
-    return d_alpha, d_crl_tpm
+    # BUGFIX: Return d_res (EM-optimized fractions) instead of d_alpha (initial values)
+    # Although EM modifies d_alpha in place, returning d_res is semantically correct
+    # and protects against future changes to EM that might return a new dictionary
+    return d_res, d_crl_tpm
 
 
 def print_configuration(args):
@@ -981,6 +990,22 @@ def main():
     # Cleanup and finalize
     os.remove(loci_file)
     finalize_output(args.outdir, 'loci.counts.temp', 'loci.counts')
+
+    # header_loci_counts = "\t".join([
+    #                                 "segment_id",              # Column 0: Read/segment identifier
+    #                                 "transcript_id",           # Column 1: Transcript ID
+    #                                 "locus_id",                # Column 2: Locus identifier
+    #                                 "crl_id",                  # Column 3: CRL (Chimeric Read Locus) group ID
+    #                                 "transcript_start",        # Column 4: Transcript start position
+    #                                 "transcript_end",          # Column 5: Transcript end position
+    #                                 "transcript_strand",       # Column 6: Transcript strand (+ or -)
+    #                                 "cigar",                   # Column 7: CIGAR string for alignment
+    #                                 "genomic_pos",             # Column 8: Genomic position (if GTF provided)
+    #                                 "locus_pos",               # Column 9: Locus position (format: chr:start:end:strand)
+    #                                 "locus_share",            # Column 10: Fraction of reads in CRL that map to this locus
+    #                                 "read_crl_fraction",      # Column 11: EM-optimized fraction (probability) that read belongs to this CRL
+    #                                 "crl_tpm"                 # Column 12: TPM (Transcripts Per Million) value for the CRL
+    # ])
 
 
 if __name__ == "__main__":
