@@ -25,15 +25,17 @@ The following Python packages need to be installed via pip or conda:
    - Purpose: Reading and manipulating BAM files, merging BAM files, sorting BAM files
 
 4. **mpire**
-   - Used in: `chira_quantify.py`, `chira_extract.py` (required for multiprocessing)
-   - Import: `from mpire import WorkerPool` and `from mpire.shared_objects import SharedObject`
+   - Used in: `chira_quantify.py`, `chira_extract.py`, `chira_merge.py` (required for multiprocessing)
+   - Import: `from mpire import WorkerPool`
    - Purpose: Enhanced multiprocessing framework for parallel processing
    - Benefits:
      - **50-90% memory reduction**: Shared objects avoid copying large dictionaries across processes
      - **2-3x faster startup**: Lower overhead than ProcessPoolExecutor/Process
      - **Better performance**: Optimized for CPU-bound parallel tasks
+     - **Copy-on-write semantics**: Uses `start_method='fork'` on Unix/Linux for optimal memory efficiency
    - Install with: `pip install mpire` or `conda install -c conda-forge mpire`
-   - Required for: Parallel EM algorithm execution in `chira_quantify.py` and parallel chimera extraction in `chira_extract.py`
+   - Required for: Parallel EM algorithm execution in `chira_quantify.py`, parallel chimera extraction in `chira_extract.py`, and parallel transcript processing in `chira_merge.py`
+   - **Note**: MPIRE automatically uses `'fork'` start method on Unix/Linux systems when available, providing copy-on-write semantics for shared objects. On Windows, it falls back to the default start method (spawn).
 
 ### Optional Dependencies
 

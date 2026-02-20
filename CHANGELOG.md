@@ -7,441 +7,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.4.11] - 2026-02-17
 
+### Fixed
+- **chira_quantify.py**: Fixed CRL ID validation bug (assumed sequential IDs) and EM algorithm return bug (returned initial instead of optimized values)
+- **chira_map.py**: Fixed alternate alignment filtering for stranded RNA-seq (quality thresholds now based only on correct-strand alignments)
+- **chira_extract.py**: Fixed field index mismatches in `loci.counts` parsing, MPIRE argument passing (dictionaries → tuples), and collapsed 8 separate `hybridization_genomic_coordinates` columns into a single column
+
 ### Changed
-- **MPIRE is now a required dependency** (previously optional):
-  - **chira_quantify.py**: MPIRE is required for parallel processing (removed ProcessPoolExecutor fallback)
-    - Benefits: 50-90% memory reduction, 2-3x faster startup, shared objects for large dictionaries
-    - All parallel EM algorithm execution now uses MPIRE WorkerPool exclusively
-  - **chira_extract.py**: MPIRE is required for parallel processing (removed multiprocessing.Process fallback)
-    - Converted chimera extraction to use MPIRE WorkerPool with shared objects
-    - Converted hybridization step to use MPIRE WorkerPool
-    - Benefits: 50-90% memory reduction, 2-3x faster startup, shared objects for reference dictionaries
-  - **chira_merge.py**: MPIRE is required for parallel processing (replaced multiprocessing.Pool)
-    - Converted transcript chunk processing to use MPIRE WorkerPool with shared objects
-    - Uses SharedObject for `d_desc` dictionary to avoid copying chunk data
-    - Benefits: 50-90% memory reduction, 2-3x faster startup, shared memory access for transcript data
-    - Applies to both overlap-based and blockbuster-based merging methods
-  - **setup.py**: Moved `mpire` from `extras_require["optional"]` to `install_requires`
-  - **Installation**: MPIRE is now automatically installed with `pip install chira`
-
-### Performance Improvements
-- **chira_quantify.py**:
-  - Removed ProcessPoolExecutor fallback code (simplified codebase)
-  - All parallel processing now uses MPIRE with shared objects for optimal performance
-  - Same logic, better performance and memory efficiency
-
-- **chira_extract.py**:
-  - Removed multiprocessing.Process fallback code (simplified codebase)
-  - Chimera extraction uses MPIRE with shared objects for reference dictionaries
-  - Hybridization step converted to MPIRE for consistency
-  - Same logic, better performance and memory efficiency
-
-- **chira_merge.py**:
-  - Replaced multiprocessing.Pool with MPIRE WorkerPool (simplified codebase)
-  - Transcript chunk processing uses MPIRE with shared objects for `d_desc` dictionary
-  - Eliminated memory overhead from copying chunk data (shared memory access instead)
-  - Same logic, better performance and memory efficiency (50-90% memory reduction)
-
-### Documentation
-- **DEPENDENCIES.md**:
-  - Moved MPIRE from optional to core dependencies
-  - Added dedicated "R Packages" section documenting `batchtools` and `jsonlite`:
-    - Clear descriptions of each R package (purpose, installation, usage)
-    - Installation instructions for both R and conda methods
-    - Notes about `jsonlite` auto-installation with `batchtools`
-    - R installation instructions (CRAN or conda)
-  - Updated "HPC Cluster Tools" section to reference new R Packages section
-  - Updated "Installation Recommendations" to reference R Packages section
-- **BATCHTOOLS_USAGE.md**:
-  - Enhanced "Prerequisites" section with separate R installation and R packages sections
-  - Added detailed descriptions of `batchtools` and `jsonlite` R packages
-  - Added installation instructions for both R and R packages (R and conda methods)
-  - Enhanced troubleshooting section with R installation guidance
-  - Clarified that batchtools and jsonlite are R packages (not Python packages)
-- **README.md**:
-  - Updated "Core Python packages" section: Moved MPIRE to required dependencies
-  - Enhanced "R packages" section with detailed documentation:
-    - Separate entries for `batchtools` and `jsonlite` with purpose and installation
-    - Installation instructions for both R and conda methods
-    - Added reference to BATCHTOOLS_USAGE.md
-  - Updated installation commands to include R packages installation
-  - Added v1.4.11 section to "Recent Improvements" documenting MPIRE changes
-  - Updated `chira_map.py` documentation to reference R packages section
-- **setup.py**:
-  - Updated MPIRE documentation: Added note about v1.4.11 change from optional to required
-  - Enhanced `requests` documentation: Listed all scripts that use it
-  - Improved batchtools/jsonlite documentation:
-    - Clarified these are R packages (not Python packages)
-    - Added separate descriptions for `batchtools` and `jsonlite`
-    - Expanded installation instructions (R base + packages)
-    - Added note about `jsonlite` auto-installation
-    - Added reference to BATCHTOOLS_USAGE.md
-- **INSTALL.md**: MPIRE installation notes updated to reflect required status
-- All documentation now consistently reflects:
-  - MPIRE as a required dependency
-  - R packages (batchtools and jsonlite) as separate from Python packages
-  - Clear installation instructions for both R and R packages
+- **MPIRE is now a required dependency** (moved from optional to `install_requires` in setup.py)
+  - All parallel processing now uses MPIRE WorkerPool with shared objects
+  - Added `start_method='fork'` for copy-on-write semantics (50-90% memory reduction on Unix/Linux)
+  - Removed ProcessPoolExecutor/Process fallback code
+  - Benefits: 50-90% memory reduction, 2-3x faster startup, shared memory access
 
 ## [1.4.10] - 2026-02-15
 
 ### Fixed
-- **chira_map.py**:
-  - Fixed batchtools template file path handling to resolve relative paths to absolute paths
-  - Fixed JSON parsing errors in batchtools submission by ensuring all paths are absolute and properly normalized
-  - Fixed `use_batchtools` check by simplifying from `hasattr` check to direct attribute access (argparse guarantees attribute existence)
-  - Added explicit UTF-8 encoding (`encoding='utf-8'`, `ensure_ascii=False`) when writing JSON configuration files
-  - Enhanced error handling for JSON file writing with try-except blocks and detailed error messages
-
-- **submit_chunks_batchtools.R**:
-  - Added file existence checks before JSON parsing
-  - Added `tryCatch` blocks for JSON parsing with detailed error messages and file content previews
-  - Improved error reporting to aid debugging of JSON parsing issues
+- **chira_map.py**: Fixed batchtools path handling (all paths now absolute) and JSON parsing errors
+- **submit_chunks_batchtools.R**: Added file existence checks and improved error handling for JSON parsing
 
 ### Changed
-- **chira_map.py**:
-  - **All paths for batchtools jobs are now absolute paths**:
-    - `reg_dir` (batchtools registry directory)
-    - `chunk_dir` (chunk output directory)
-    - `python_script` (process_chunk_batchtools.py path)
-    - `template_file` (LSF template file path, except for built-in "lsf-simple")
-    - `chunk_file` (individual chunk FASTA file paths in chunks.json)
-    - `refindex` (BWA reference index paths in alignment_job_types)
-  - Ensures batchtools jobs running on cluster nodes can correctly resolve all file paths
-  - All paths are normalized using `os.path.abspath()` and `os.path.normpath()` before being written to JSON
-  - Moved `parse_arguments()` function to the end of the file, just before `main()`
-
-- **process_chunk_batchtools.py**:
-  - Refactored to extract argument parsing into `parse_arguments()` function
-  - Extracted main execution flow into `main()` function
-  - Moved `parse_arguments()` to the end of the file, just before `main()`
-  - Improved code organization and maintainability
-
-- **chira_quantify.py**:
-  - Refactored to extract complex procedures from `main()` section:
-    - Extracted `print_configuration(args)` function
-    - Extracted `write_crl_output(loci_file, output_file, d_read_crl_fractions, d_crl_tpms)` function
-    - Extracted `finalize_output(outdir, temp_file, final_file)` function
-  - Moved `parse_arguments()` to the end of the file, just before `main()`
-  - Improved code organization and readability
-
-- **chira_merge.py**:
-  - Refactored to extract complex procedures from `main()` section:
-    - Extracted `print_configuration(args)` function
-    - Extracted `setup_references(args)` function
-    - Extracted `process_segments(args, d_reflen1, d_reflen2)` function
-    - Extracted `merge_loci(args)` function
-  - Moved `parse_arguments()` to the end of the file, just before `main()`
-  - Improved code organization and readability
-
-- **chira_collapse.py**:
-  - Refactored to extract complex procedures from `main()` section:
-    - Extracted `print_configuration(args)` function
-    - Extracted `collapse_fastq_to_fasta(fastq_file, fasta_file, umi_len)` function
-  - Added `parse_arguments()` function and moved it to the end of the file, just before `main()`
-  - Improved code organization and readability
-
-- **download_mirbase_gff3.py**:
-  - Refactored to extract complex procedures from `main()` section:
-    - Extracted `validate_liftover_params(args)` function
-    - Extracted `print_download_info(args, liftover_params, chr_mapping)` function
-  - Moved `parse_arguments()` to the end of the file, just before `main()`
-  - Improved code organization and readability
-
-- **remove_mirna_hairpin_from_gtf.py**:
-  - Refactored to extract complex procedures from `main()` section:
-    - Extracted `compile_mirna_pattern(pattern_str)` function
-  - Added `parse_arguments()` function and moved it to the end of the file, just before `main()`
-  - Improved code organization and readability
-
-- **concatenate_gtf.py**:
-  - Added `parse_arguments()` function and moved it to the end of the file, just before `main()`
-  - Extracted main execution flow into `main()` function
-  - Improved code organization and maintainability
-
-- **extract_transcripts_from_genome.py**:
-  - Added `parse_arguments()` function and moved it to the end of the file, just before `main()`
-  - Extracted main execution flow into `main()` function
-  - Improved code organization and maintainability
-
-- **download_mirbase_mature.py**:
-  - Refactored to extract complex procedures from `main()` section:
-    - Extracted `cleanup_temp_file(temp_file, keep_file)` function
-  - Moved `parse_arguments()` to the end of the file, just before `main()`
-  - Improved code organization and readability
-
-- **download_ensembl.py**:
-  - Added `parse_arguments()` function and moved it to the end of the file, just before `main()`
-  - Extracted main execution flow into `main()` function
-  - Improved code organization and maintainability
+- **Code refactoring**: All scripts refactored to extract `parse_arguments()` and modularize `main()` functions for better code organization
+- **chira_map.py**: All batchtools job paths are now absolute and normalized for cluster execution
 
 ## [1.4.9] - 2026-02-15
 
 ### Added
-- **chira_map.py**:
-  - Added `--parallel_chunks` parameter to control how many chunks run simultaneously when using `--chunk_fasta`
-  - Default value: 2 (recommended for most systems)
-  - Allows users to customize parallelism based on their system resources (memory, CPU)
-  - Comprehensive help text with recommendations for different system sizes
+- **chira_map.py**: Added `--parallel_chunks` parameter to control chunk parallelism (default: 2)
 
-### Changed
-- **chira_map.py**:
-  - Changed from hardcoded limit of 2 parallel chunks to user-configurable via `--parallel_chunks` parameter
-  - Default behavior preserved: 2 chunks in parallel (same as before when parameter not specified)
-  - Updated execution model comments to reflect configurable parallelism
-  - Updated ASCII diagrams and documentation to show user control over parallel chunk execution
-  - **Bug fix**: Fixed `print_cpu_guidance()` function that was incorrectly using total chunks (`args.chunk_fasta`) instead of parallel chunks for CPU guidance display
-    - Now correctly uses `args.parallel_chunks` (default: 2) to match actual execution logic
-    - Fixes misleading CPU usage information in guidance output
-
-- **README.md**:
-  - Added comprehensive documentation for `--parallel_chunks` parameter
-  - Updated `--chunk_fasta` documentation to reference `--parallel_chunks`
-  - Updated usage examples to show `--parallel_chunks` usage
-  - Updated "Understanding Chunking and Process Management" section with new parameter
-  - Added recommendations for setting `--parallel_chunks` based on system resources
+### Fixed
+- **chira_map.py**: Fixed CPU guidance display to use parallel chunks instead of total chunks
 
 ## [1.4.8] - 2026-02-15
 
 ### Changed
-- **chira_merge.py**:
-  - **Improved chunk-based parallelization strategy** for very large transcript counts (e.g., human genome with 387K+ transcripts)
-    - Changed from adaptive chunk sizing to fixed target chunk size (~1000 transcripts per chunk)
-    - For human genome (387,944 transcripts): Creates ~388 manageable chunks instead of 32 large chunks
-    - Removes artificial caps that limited chunk count, allowing proper scaling for very large datasets
-    - Better load balancing and reduced overhead for datasets with hundreds of thousands of transcripts
-  - **Variable naming consistency**: Updated all "chrom"/"chromid" references to "transcript"/"transcriptid" throughout the code
-    - Updated function parameters, variable names, comments, and docstrings
-    - Reflects that column 1 of input BED file contains transcript IDs, not chromosome IDs
-  - **Bug fix**: Added `None` check in `merge_loci_blockbuster()` to prevent errors when `prev_transcript_strand` is `None` (first iteration or empty file)
-  - **Updated help text**: Changed argument help text from "chromosome processing" to "transcript processing" for accuracy
+- **chira_merge.py**: Improved chunk-based parallelization for very large datasets (fixed ~1000 transcripts per chunk), updated variable naming (chrom → transcript)
 
 ### Fixed
-- **chira_merge.py**:
-  - Fixed potential `AttributeError` in `merge_loci_blockbuster()` when processing empty files or at first iteration
-  - Fixed variable naming inconsistency (chrom vs transcript) that could cause confusion
+- **chira_merge.py**: Fixed `AttributeError` when processing empty files, corrected variable naming inconsistencies
 
 ## [1.4.7] - 2026-02-15
 
 ### Added
-- **extract_transcripts_from_genome.py** (new utility script):
-  - Created script to extract transcript FASTA sequences from genome FASTA using gffread
-  - Uses gffread (from [GFF utilities](https://ccb.jhu.edu/software/stringtie/gff.shtml#gffread)) to extract sequences based on GTF coordinates
-  - Replaces `remove_mirna_hairpin_from_fasta.py` with a more accurate approach
-  - Extracts sequences directly from genome FASTA, ensuring accuracy and completeness
-  - Automatically validates gffread availability and provides installation instructions
-  - Parameters: `-g, --gtf` (filtered GTF file), `-f, --genome-fasta` (genome FASTA), `-o, --output` (output transcript FASTA)
-
-- **Dockerfile**:
-  - Added `gffread` package for transcript extraction functionality
+- **extract_transcripts_from_genome.py**: New utility script to extract transcript FASTA from genome FASTA using gffread
+- **Dockerfile**: Added `gffread` package
 
 ### Changed
-- **download_mirbase_mature.py**:
-  - Added automatic conversion of U (uracil) to T (thymine) in mature miRNA sequences
-  - Ensures compatibility with ChiRA analysis, which expects DNA sequences (with T) rather than RNA sequences (with U)
-  - Conversion applied to both uppercase and lowercase nucleotides when writing sequences
-
-- **concatenate_gtf.py**:
-  - Updated documentation to reflect that miRBase GFF3 format can be used directly with ChiRA
-  - Updated docstring and help text to clarify that miRBase GFF3 files don't need conversion to GTF format
-  - Updated parameter descriptions to mention GFF3 format support
-
-- **Dockerfile**:
-  - Added `gffread` to conda packages for transcript extraction functionality
-  - Updated package list to include all required dependencies
-
-- **README.md**:
-  - Updated workflow examples to use `extract_transcripts_from_genome.py` instead of `remove_mirna_hairpin_from_fasta.py`
-  - Updated to use genome FASTA (primary assembly) instead of cDNA FASTA for transcript extraction
-  - Added documentation for `extract_transcripts_from_genome.py` utility script
-  - Updated `download_mirbase_mature.py` documentation to mention U→T conversion
-  - Updated `concatenate_gtf.py` documentation to mention GFF3 format support
-  - Updated Docker image contents and installation instructions to include `gffread`
+- **download_mirbase_mature.py**: Added automatic U→T conversion in mature miRNA sequences
+- **concatenate_gtf.py**: Updated to support miRBase GFF3 format directly
 
 ### Removed
-- **remove_mirna_hairpin_from_fasta.py**:
-  - Removed script (replaced by `extract_transcripts_from_genome.py`)
-  - New approach extracts sequences directly from genome FASTA using gffread, which is more accurate than filtering pre-extracted sequences
-
-- **concatenate_fasta.py**:
-  - Removed utility script (no longer needed)
-  - Users can manually concatenate FASTA files using standard Unix tools (e.g., `cat`) if needed
+- **remove_mirna_hairpin_from_fasta.py**: Replaced by `extract_transcripts_from_genome.py`
+- **concatenate_fasta.py**: No longer needed (use standard Unix tools)
 
 ## [1.4.6] - 2026-02-15
 
 ### Added
-- **chira_utilities.py**:
-  - Added `get_adaptive_buffer_size()` function for intelligent I/O buffer sizing (lines 178-218)
-  - Automatically calculates optimal buffer size (8-16MB) based on available system memory
-  - Uses `psutil` (optional) to detect available RAM and calculate per-file buffer size
-  - Reduces system calls by 1000-2000x for large files (10-50x I/O performance improvement)
-  - Falls back to 8MB default if `psutil` unavailable
-
-- **chira_merge.py**:
-  - Re-added parallel processing support using `multiprocessing.Pool` (replaces previous `ThreadPoolExecutor` implementation)
-  - Added `_process_chromosome_overlap()` worker function for parallel chromosome processing in overlap-based merging
-  - Added `_process_chromosome_blockbuster()` worker function for parallel chromosome processing in blockbuster-based merging
-  - New parameter: `-p, --processes` (default: None, auto-detects CPU count)
-  - Uses `multiprocessing` instead of `threading` to bypass Python GIL for true parallelism
-  - Performance: 4-8x faster for large datasets with many chromosomes
-  - Adaptive buffer sizing using `chira_utilities.get_adaptive_buffer_size()` for improved I/O performance (8-16MB buffers)
-  - Pre-compiled regex pattern `_EXON_ID_PATTERN` for better performance
-
-- **chira_map.py**:
-  - Added `split_fasta_into_chunks()` function for parallel processing of large FASTA files
-  - Added `--chunk_fasta` parameter to split input FASTA into N chunks for better I/O and memory efficiency
-  - Added `detect_io_bottleneck()` function for automatic I/O bottleneck detection (requires `psutil`)
-  - Added `print_cpu_guidance()` function to provide CPU usage recommendations based on system capabilities
-  - Added `run_bwa_mapping_parallel()` function for parallel BWA alignment job execution
-  - Added `calculate_sort_memory()` function for optimal BAM sorting memory calculation
-  - Added `merge_and_sort_bams()` function for efficient BAM merging and sorting
-  - Added `process_bed_file()` function for BED file sorting and deduplication
-  - Added progress tracking in `write_mapped_bed()` (reports progress every 1M reads)
-  - Refactored main script into modular functions: `parse_arguments()`, `validate_arguments()`, `print_cpu_guidance()`, `main()`
-  - Enhanced `--processes` parameter help text with detailed CPU usage guidance for chunking vs non-chunking modes
-
-- **chira_extract.py**:
-  - Refactored main script into modular functions for better code organization:
-    - `parse_arguments()`: Command-line argument parsing
-    - `validate_arguments()`: Input validation
-    - `print_configuration()`: Configuration printing
-    - `setup_references()`: Reference file setup
-    - `run_chimera_extraction()`: Multiprocessing orchestration
-    - `prepare_reference_file()`: Reference file preparation for hybridization
-    - `extract_loci_sequences()`: FASTA sequence extraction using bedtools
-    - `build_intarna_params()`: IntaRNA parameter building
-    - `run_hybridization()`: Hybridization workflow
-    - `merge_output_files()`: Output file merging
-    - `main()`: Main workflow orchestration
-
-- **chira_quantify.py**:
-  - Added `ProcessPoolExecutor` import for multiprocessing support
-  - Enhanced parallel processing logging with detailed statistics
+- **chira_utilities.py**: Added adaptive buffer sizing (8-16MB) based on available RAM (10-50x I/O improvement)
+- **chira_map.py**: Added FASTA chunking (`--chunk_fasta`), I/O bottleneck detection, and progress tracking
+- **chira_merge.py**: Re-added parallel processing with `multiprocessing.Pool` (4-8x faster)
+- **chira_extract.py**: Refactored into modular functions
 
 ### Changed
-- **chira_merge.py**:
-  - Replaced `ThreadPoolExecutor` (threading) with `multiprocessing.Pool` (multiprocessing) for parallel chromosome processing
-  - Changed parameter from `-t, --threads` to `-p, --processes` to reflect multiprocessing implementation
-  - Updated `merge_loci_overlap()` to accept `num_processes` parameter (default: None for auto-detection)
-  - Updated `merge_loci_blockbuster()` to accept `num_processes` parameter (default: None for auto-detection)
-  - Improved I/O performance with adaptive buffer sizing (8-16MB instead of 1MB)
-
-- **chira_map.py**:
-  - Replaced `os.system()` with `subprocess.run()` for better error handling in BWA alignment
-  - Changed from fixed 2MB buffers to adaptive buffer sizing (8-16MB) using `chira_utilities.get_adaptive_buffer_size()`
-  - Optimized `write_mapped_bed()` function:
-    - Pre-compiled strand check conditions to avoid repeated string comparisons (5-10% speedup)
-    - Added progress reporting for large files (every 1M reads)
-    - Improved logic flow for unmapped reads and wrong-strand reads
-  - Enhanced `clan_to_bed()` with adaptive buffer sizing
-  - Improved BAM sorting memory calculation with automatic detection
-  - Enhanced parallel sort detection and usage for BED files
-  - Refactored main workflow into modular functions for better maintainability
-
-- **chira_quantify.py**:
-  - Replaced `ThreadPoolExecutor` with `ProcessPoolExecutor` for EM algorithm parallelization
-  - Changed parameter from `num_threads` to `num_processes` to reflect multiprocessing implementation
-  - Updated `_process_reads_chunk_e_step()` to work with `ProcessPoolExecutor` (returns values instead of in-place updates)
-  - Updated `_process_reads_chunk_aggregate()` to work with `ProcessPoolExecutor` (returns regular dict instead of defaultdict)
-  - Increased minimum read threshold for parallelization (500 reads or num_processes × 50) to justify process overhead
-  - Added detailed logging for parallel processing configuration
-  - Performance: 2-8x faster with ProcessPoolExecutor vs ThreadPoolExecutor for CPU-bound operations (bypasses GIL)
-
-- **chira_extract.py**:
-  - Refactored monolithic main script into modular functions for better code organization and maintainability
-  - Improved code readability and testability through function separation
+- **Multiprocessing evolution**: ThreadPoolExecutor → ProcessPoolExecutor (bypasses GIL, 2-8x faster)
+- **I/O optimizations**: Fixed 2MB buffers → adaptive 8-16MB buffers (10-50x faster for large files)
+- **chira_map.py**: Replaced `os.system()` with `subprocess.run()`, added progress tracking
+- **chira_merge.py**: Parameter changed from `-t, --threads` to `-p, --processes`
 
 ## [1.4.5] - 2026-02-02
 
 ### Added
-- **Parallel Computing Support**:
-  - **chira_quantify.py**:
-    - Added multi-threading support for EM algorithm using `ThreadPoolExecutor`
-    - New parameter: `-t, --threads` (default: 1, use 0 for all available cores)
-    - Parallelizes E-step (multimapped reads) and aggregation step
-    - Automatically uses all CPU cores when `--threads 0` is specified
-    - Falls back to sequential processing for small datasets (<100 reads) to avoid overhead
-    - Performance: 2-4x faster for large datasets with many multimapping reads
-  
-  - **chira_merge.py**:
-    - Added multi-threading support for chromosome processing using `ThreadPoolExecutor`
-    - New parameter: `-t, --threads` (default: 1, use 0 for all available cores)
-    - Parallelizes chromosome processing in overlap-based merging
-    - Parallel sort support for blockbuster-based merging (GNU sort `--parallel`)
-    - Automatically uses all CPU cores when `--threads 0` is specified
-    - Falls back to sequential processing for small datasets (<10 chromosomes)
-    - Performance: 2-4x faster for datasets with many chromosomes
-  
-  - **chira_map.py**:
-    - Enhanced multi-threading for external tools (`samtools`, `pysam`, `sort`)
-    - Added `-@` flag to `samtools view` for multi-threaded SAM to BAM conversion
-    - Added `-@` flag to `pysam.merge` for multi-threaded BAM merging
-    - Added `-@` flag to `pysam.sort` for multi-threaded BAM sorting
-    - New parameter: `--sort_memory` for manual memory specification per thread (e.g., "2G", "3G")
-    - Automatic memory optimization using `psutil` (optional dependency)
-      - Calculates optimal memory per thread based on available RAM
-      - Prevents memory exhaustion by ensuring total memory < available RAM
-      - Falls back to safe default (2GB per thread) if `psutil` unavailable
-    - Parallel sort support for BED file sorting (GNU sort `--parallel`)
-    - Performance: 2-4x faster for large BAM files and sorting operations
-  
-  - **chira_extract.py**:
-    - Enhanced parallel sort support for file merging and interaction summary
-    - Parallel sort in `merge_files()` function (GNU sort `--parallel`)
-    - Parallel sort in `write_interaction_summary()` function (GNU sort `--parallel`)
-    - Uses number of processes for parallel sort threads
-    - Performance: 2-4x faster sorting for large output files
-
-- **I/O Performance Optimizations**:
-  - **chira_collapse.py**:
-    - Added 2MB buffer size for reading uncompressed FASTQ files
-    - Added 2MB buffer size for writing FASTA output files
-    - Performance: 20-40% faster I/O for large files
-  
-  - **chira_map.py**:
-    - Added 2MB buffer size for BED and FASTA file writing
-    - Performance: 20-40% faster I/O for large output files
-  
-  - **chira_extract.py**:
-    - Added 2MB buffer size for file I/O operations
-    - Performance: 20-40% faster I/O for large files
-
-- **GNU coreutils Support**:
-  - Automatic detection of GNU sort version >= 8.6 for parallel sort support
-  - Graceful fallback to standard sort if GNU sort unavailable
-  - Works on Linux (standard) and macOS (via Homebrew: `brew install coreutils`)
+- **Parallel computing support**: Multi-threading in `chira_quantify.py` and `chira_merge.py` (2-4x faster)
+- **I/O optimizations**: Added 2MB buffer sizes for file I/O (20-40% faster)
+- **GNU sort parallel support**: Automatic detection and usage (2-4x faster sorting)
+- **chira_map.py**: Enhanced multi-threading for external tools (samtools, pysam) with automatic memory optimization
 
 ### Changed
-- **chira_quantify.py**:
-  - EM algorithm now supports multi-threading via `ThreadPoolExecutor`
-  - Shallow copy optimization (`dict(d_rho)` instead of `copy.deepcopy()`) - 10-50x faster
-  - Removed redundant `sorted()` call in `tpm()` function (median already sorts internally)
-  - Optimized dictionary iteration using `.items()` instead of key lookups
-  - Pre-computed inverse values to avoid repeated divisions
-  - Cached frequently used values (num_crls, inv_num_crls, sorted_crlids, inv_millions)
-  - Pre-sorted `d_readlocus_transcripts` to avoid repeated sorting in output loop
-  - Removed single-use variable caching per user request
-  - Added comprehensive comments explaining each optimization
-
-- **chira_merge.py**:
-  - Chromosome processing now supports multi-threading
-  - Parallel sort support for blockbuster-based merging
-  - Added comprehensive comments explaining optimizations
-  - Maintains exact algorithm logic in both sequential and parallel paths
-
-- **chira_map.py**:
-  - Enhanced external tool multi-threading (samtools, pysam, sort)
-  - Automatic memory calculation for BAM sorting with `psutil` (optional)
-  - Parallel sort support for BED files
-  - Moved `psutil` import to top of file for clarity
-  - Added comprehensive comments explaining optimizations
-  - Fixed bug: removed unused `readseq = None` initialization
-  - Fixed bug: use cached `ref_start_int` instead of recalculating `int(ref_start)`
-  - Inlined single-use variables per user request
-
-- **chira_extract.py**:
-  - Enhanced parallel sort support for file merging
-  - Added buffer sizes for I/O operations
-  - Added comprehensive comments explaining optimizations
+- **chira_quantify.py**: Shallow copy optimization (10-50x faster), pre-computed values, optimized dictionary operations
+- **chira_map.py**: Automatic memory calculation with `psutil`, parallel sort support
 
 - **chira_collapse.py**:
   - Added buffer sizes for I/O operations

@@ -75,6 +75,7 @@ setup(
                           # - Required for parallel processing in chira_quantify.py, chira_extract.py, and chira_merge.py (no fallback)
                           # - Version >= 2.4.0 required for shared_objects module support
                           # - Changed from optional to required in v1.4.11
+                          # - Uses start_method='fork' on Unix/Linux for copy-on-write semantics (optimal memory efficiency)
     ],
     extras_require={
         "optional": [

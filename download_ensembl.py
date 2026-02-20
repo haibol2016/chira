@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Download cDNA, ncRNA, GTF, and genome FASTA files from Ensembl.
+Download GTF, and genome FASTA files from Ensembl.
 
 This script downloads species-specific files from Ensembl FTP server
 for a given genome version and GTF annotation version.
@@ -157,13 +157,7 @@ def get_ensembl_file_info(species, release_version, file_type, assembly=None):
     base_path = f"/pub/release-{release_version}"
     species_cap = species.capitalize()
     
-    if file_type == 'cdna':
-        remote_dir = f"{base_path}/fasta/{species}/cdna/"
-        pattern = '.cdna.all.fa.gz'
-    elif file_type == 'ncrna':
-        remote_dir = f"{base_path}/fasta/{species}/ncrna/"
-        pattern = '.ncrna.fa.gz'
-    elif file_type == 'gtf':
+    if file_type == 'gtf':
         remote_dir = f"{base_path}/gtf/{species}/"
         pattern = f'.{release_version}.gtf.gz'
     elif file_type == 'genome':
@@ -182,11 +176,7 @@ def get_ensembl_file_info(species, release_version, file_type, assembly=None):
     
     # Fallback: construct filename if assembly is provided
     if assembly:
-        if file_type == 'cdna':
-            filename = f"{species_cap}.{assembly}.cdna.all.fa.gz"
-        elif file_type == 'ncrna':
-            filename = f"{species_cap}.{assembly}.ncrna.fa.gz"
-        elif file_type == 'gtf':
+        if file_type == 'gtf':
             filename = f"{species_cap}.{assembly}.{release_version}.gtf.gz"
         elif file_type == 'genome':
             filename = f"{species_cap}.{assembly}.dna.primary_assembly.fa.gz"
@@ -218,8 +208,6 @@ def download_ensembl_files(species, genome_version, gtf_version, output_dir,
     ftp_host = "ftp.ensembl.org"
     
     files_to_download = [
-        ('cdna', genome_version),
-        ('ncrna', genome_version),
         ('gtf', gtf_version),
         ('genome', genome_version)
     ]
@@ -290,7 +278,7 @@ def download_ensembl_files(species, genome_version, gtf_version, output_dir,
 def parse_arguments():
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
-        description='Download cDNA, ncRNA, GTF, and genome FASTA files from Ensembl',
+        description='Download GTF, and genome FASTA files from Ensembl',
         usage='%(prog)s [-h] [-v,--version]',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )

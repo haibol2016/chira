@@ -21,99 +21,47 @@ See [CHANGELOG.md](CHANGELOG.md) for detailed change history.
 
 ## Recent Improvements
 
-### v1.4.11 (2026-02-17) - MPIRE Required Dependency
+### v1.4.11 (2026-02-17) - MPIRE Required & Critical Bug Fixes
 
-**Multiprocessing Improvements:**
-- **MPIRE is now a required dependency** (previously optional):
-  - **chira_quantify.py**: MPIRE required for parallel processing (removed ProcessPoolExecutor fallback)
-    - Benefits: 50-90% memory reduction, 2-3x faster startup, shared objects for large dictionaries
-    - All parallel EM algorithm execution now uses MPIRE WorkerPool exclusively
-  - **chira_extract.py**: MPIRE required for parallel processing (removed multiprocessing.Process fallback)
-    - Converted chimera extraction to use MPIRE WorkerPool with shared objects
-    - Converted hybridization step to use MPIRE WorkerPool
-    - Benefits: 50-90% memory reduction, 2-3x faster startup, shared objects for reference dictionaries
-  - **chira_merge.py**: MPIRE required for parallel processing (replaced multiprocessing.Pool)
-    - Converted transcript chunk processing to use MPIRE WorkerPool with shared objects
-    - Uses SharedObject for `d_desc` dictionary to avoid copying chunk data
-    - Benefits: 50-90% memory reduction, 2-3x faster startup, shared memory access for transcript data
-  - **setup.py**: Moved `mpire` from `extras_require["optional"]` to `install_requires`
-  - **Installation**: MPIRE is now automatically installed with `pip install chira`
+**Critical Bug Fixes:**
+- Fixed CRL ID validation and EM algorithm return bugs in `chira_quantify.py`
+- Fixed alternate alignment filtering for stranded RNA-seq in `chira_map.py`
+- Fixed field index mismatches and MPIRE argument passing in `chira_extract.py`
+- Collapsed 8 separate `hybridization_genomic_coordinates` columns into a single column
 
-**Performance Improvements:**
-- Removed ProcessPoolExecutor/Process fallback code (simplified codebase)
-- All parallel processing now uses MPIRE with shared objects for optimal performance
-- Same logic, better performance and memory efficiency
+**Multiprocessing:**
+- **MPIRE is now required** (moved from optional to `install_requires`)
+- All parallel processing uses MPIRE WorkerPool with shared objects
+- Added `start_method='fork'` for copy-on-write semantics (50-90% memory reduction)
+- Benefits: 50-90% memory reduction, 2-3x faster startup
 
-**Documentation:**
-- Updated all documentation to reflect MPIRE as a required dependency
-- Updated installation instructions and dependency lists
-
-### v1.4.7 (2026-02-15) - Utility Script Updates & Improvements
+### v1.4.7-1.4.10 (2026-02-15) - Utility Scripts, Code Refactoring & Batchtools
 
 **New Features:**
-- **extract_transcripts_from_genome.py**: New utility script to extract transcript FASTA sequences from genome FASTA using gffread
-  - Replaces `remove_mirna_hairpin_from_fasta.py` with a more accurate approach
-  - Extracts sequences directly from genome coordinates using gffread
-- **download_mirbase_mature.py**: Added automatic U→T conversion in mature miRNA sequences for ChiRA compatibility
-- **concatenate_gtf.py**: Updated documentation to reflect that miRBase GFF3 format can be used directly with ChiRA
-
-**Docker:**
-- Added `gffread` package to Dockerfile for transcript extraction functionality
-
-**Removed:**
-- `remove_mirna_hairpin_from_fasta.py`: Replaced by `extract_transcripts_from_genome.py`
-- `concatenate_fasta.py`: No longer needed (use standard Unix tools like `cat`)
-
-### v1.4.6 (2026-02-15) - Multiprocessing & I/O Optimizations
-
-**Multiprocessing Improvements:**
-- **chira_quantify.py**: Changed from `ThreadPoolExecutor` to `ProcessPoolExecutor` to MPIRE for EM algorithm (2-8x faster, bypasses Python GIL, 50-90% memory reduction)
-  - Parameter: `-t, --threads` (use 0 for all available cores)
-  - MPIRE is required (no fallback)
-- **chira_extract.py**: Changed from `multiprocessing.Process` to MPIRE for chimera extraction (50-90% memory reduction, 2-3x faster startup)
-  - MPIRE is required (no fallback)
-- **chira_merge.py**: Changed from `ThreadPoolExecutor` to chunk-based `multiprocessing.Pool` to MPIRE for transcript processing (4-8x faster, 50-90% memory reduction)
-  - Parameter changed: `-t, --threads` → `-p, --processes` (default: None, auto-detects CPU count)
-  - **Chunk-based strategy**: Groups transcripts into chunks (~1000 per chunk) to reduce overhead for very large datasets (e.g., 387K+ transcripts)
-  - MPIRE is required (no fallback)
-- **chira_map.py**: Enhanced with FASTA chunking and intelligent process management
-  - New parameter: `--chunk_fasta` for splitting large FASTA files into chunks
-  - **Process-aware chunking**: Parallel chunk execution automatically limited by available processes
-  - **Total processes control**: `--processes` now specifies total processes, automatically divided among jobs/chunks
-  - CPU usage guidance based on system capabilities
-
-**I/O Performance Optimizations:**
-- **Adaptive buffer sizing**: Automatically calculates optimal buffer size (8-16MB) based on available RAM
-  - Reduces system calls by 1000-2000x for large files
-  - **10-50x faster** I/O performance for large files (150M+ reads)
-  - Uses `psutil` (optional) for intelligent buffer sizing
-  - Falls back to 8MB default if `psutil` unavailable
-- **Progress tracking**: Reports progress every 1M reads for large BAM files
+- **extract_transcripts_from_genome.py**: New utility script using gffread (replaces `remove_mirna_hairpin_from_fasta.py`)
+- **download_mirbase_mature.py**: Added automatic U→T conversion for ChiRA compatibility
+- **chira_map.py**: Added `--parallel_chunks` parameter and FASTA chunking support
+- **Batchtools support**: Enhanced HPC cluster job submission with absolute path handling
 
 **Code Improvements:**
-- Refactored `chira_extract.py` and `chira_map.py` into modular functions for better maintainability
-- Better error handling with `subprocess.run()` instead of `os.system()`
-- Enhanced logging and user guidance
+- All scripts refactored for better code organization (modular functions, consistent structure)
+- Improved chunk-based parallelization for very large datasets (e.g., 387K+ transcripts)
 
-### v1.4.5 (2026-02-02) - Parallel Computing & Performance Enhancements
+### v1.4.6 (2026-02-15) - Multiprocessing Evolution & I/O Optimizations
 
-**Parallel Computing Support:**
-- **Multi-threading** in `chira_quantify.py`: EM algorithm parallelization (2-4x faster)
-  - New parameter: `-t, --threads` (use 0 for all available cores)
-  - **Multiprocessing** in `chira_merge.py`: Transcript chunk processing parallelization using MPIRE (4-8x faster, 50-90% memory reduction, improved in v1.4.8 with chunk-based strategy, upgraded to MPIRE in v1.4.11)
-  - New parameter: `-t, --threads` (use 0 for all available cores)
-- **Enhanced multi-threading** in `chira_map.py`: External tools (samtools, pysam, sort)
-  - Automatic memory optimization with `psutil` (optional dependency)
-  - New parameter: `--sort_memory` for manual memory specification
-- **Parallel sort** support: Automatic detection of GNU sort `--parallel` (2-4x faster sorting)
-- **I/O optimizations**: 2MB buffer sizes for faster file I/O (20-40% faster)
+**Multiprocessing Evolution:**
+- ThreadPoolExecutor → ProcessPoolExecutor → MPIRE (bypasses GIL, 2-8x faster)
+- Adaptive buffer sizing (8-16MB, 10-50x I/O improvement for large files)
+- FASTA chunking support in `chira_map.py` for better memory efficiency
+- Progress tracking for large BAM files (reports every 1M reads)
 
-**Performance Improvements:**
-- **2-4x faster** EM algorithm with multi-threading for large datasets
-- **2-4x faster** transcript processing with multi-threading (improved in v1.4.8 with chunk-based strategy for very large datasets)
-- **2-4x faster** BAM operations with multi-threaded tools
-- **2-4x faster** file sorting with GNU sort parallel support
-- **20-40% faster** I/O operations with optimized buffer sizes
+### v1.4.5 (2026-02-02) - Parallel Computing Introduction
+
+**Initial Parallel Computing:**
+- Multi-threading support in `chira_quantify.py` and `chira_merge.py` (2-4x faster)
+- Enhanced multi-threading for external tools (samtools, pysam) in `chira_map.py`
+- GNU sort parallel support (2-4x faster sorting)
+- I/O optimizations with 2MB buffers (20-40% faster)
 
 ### v1.4.4 (2026-01-26) - Performance Optimizations
 
@@ -309,35 +257,33 @@ The ChiRA pipeline consists of five main steps, from raw FASTQ files to final in
 Before starting the analysis, prepare your reference files:
 
 **1.1 Download mature miRNA sequences:**
+
 ```bash
-# Download species-specific mature miRNAs from miRBase
+# Download species-specific mature miRNAs from miRBase and convert "U" to "T"
 download_mirbase_mature.py -s hsa -o mature_mirna_hsa.fasta
 ```
 
 **1.2 Download Ensembl reference files:**
+
 ```bash
-# Download cDNA, ncRNA, GTF, and genome FASTA from Ensembl
-download_ensembl.py -s homo_sapiens -g 110 -t 110 -o ./ensembl_files
+# Download GTF, and genome FASTA from Ensembl
+download_ensembl.py -s homo_sapiens -g 115 -t 115 -o ./ensembl_files
 ```
 
 **1.3 Download miRBase GFF3 file:**
+
 ```bash
 # Download species-specific GFF3 file from miRBase (contains mature miRNA coordinates)
 download_mirbase_gff3.py -s hsa -o hsa.gff3
-
-# With chromosome name mapping (if needed)
-download_mirbase_gff3.py -s hsa -o hsa.gff3 -m chr_mapping.txt
-
-# Download specific version (e.g., version 21)
-download_mirbase_gff3.py -s hsa -o hsa_v21.gff3 --mirbase-version 21
 ```
 
 **Note:** The GFF3 file from miRBase contains mature miRNA coordinates and can be used directly with ChiRA. You don't need to convert it to GTF format. 
 
 **1.4 Prepare target transcriptome (remove miRNAs):**
+
 ```bash
 # Remove miRNA entries from Ensembl GTF
-remove_mirna_hairpin_from_gtf.py -i ensembl_files/Homo_sapiens.GRCh38.110.gtf \
+remove_mirna_hairpin_from_gtf.py -i ensembl_files/Homo_sapiens.GRCh38.115.gtf \
   -o target_transcriptome.gtf
 
 # Extract transcript sequences from genome FASTA using filtered GTF
@@ -347,7 +293,8 @@ extract_transcripts_from_genome.py -g target_transcriptome.gtf \
   -o target_transcriptome.fasta
 ```
 
-**1.5 Combine miRNA and target GTF (for annotation):**
+**1.5 Combine miRNA gff3 and filtered GTF (for annotation):**
+
 ```bash
 # Concatenate miRNA GTF with target GTF
 concatenate_gtf.py -m mature_mirna.gtf -t target_transcriptome.gtf \
@@ -355,9 +302,11 @@ concatenate_gtf.py -m mature_mirna.gtf -t target_transcriptome.gtf \
 ```
 
 **Result:** You now have:
-- `ref1.fasta`: Mature miRNA sequences (from miRBase)
-- `ref2.fasta`: Target transcriptome sequences (without miRNAs)
+
+- `mature_mirna_hsa.fasta`: Mature miRNA sequences (from miRBase) with "U" replaced by "T"
+- `target_transcriptome.fasta`: Target transcriptome sequences (without miRNAs)
 - `combined_annotation.gtf`: Combined annotation file (if combining miRNA and target annotations)
+- `GRCh38.primary.assembly.fasta`: Target genome sequences
 
 ---
 
@@ -366,10 +315,10 @@ concatenate_gtf.py -m mature_mirna.gtf -t target_transcriptome.gtf \
 Deduplicate reads from FASTQ file:
 
 ```bash
-chira_collapse.py -i raw_reads.fastq -o collapsed_reads.fasta -u 12
+chira_collapse.py -i raw_reads.fastq -o collapsed_reads.fasta -u 6
 ```
 
-**Input:** Raw FASTQ file (quality and adapter trimmed)  
+**Input:** Raw FASTQ file (quality and adapter trimmed using cutadapt)  
 **Output:** FASTA file with unique sequences and read counts
 
 ---
@@ -379,21 +328,29 @@ chira_collapse.py -i raw_reads.fastq -o collapsed_reads.fasta -u 12
 Map collapsed reads to reference transcriptomes:
 
 ```bash
-# Build indices and map (one command, using 8 processes for parallelization)
+# Build indices and map (one command)
+# -p 8: Use 8 CPU processes (omit to auto-detect all available cores)
+# -s fw: Forward strand mapping (default, recommended for CLASH, CLEAR-CLIP, PARIS, SPLASH)
+# -a bwa: Use BWA aligner (default)
 chira_map.py -i collapsed_reads.fasta -o mapping_output \
-  -f1 ref1.fasta -f2 ref2.fasta -b -a bwa -s both -p 8
+  -f1 target_transcriptome.fasta -f2 mature_mirna_hsa.fasta \
+  -a bwa -b -p 8 -s fw
 
-# Or use pre-built indices (using 8 processes for parallelization)
+# Or use pre-built indices
 chira_map.py -i collapsed_reads.fasta -o mapping_output \
-  -x1 index1 -x2 index2 -a bwa -s both -p 8
+  -x1 index1 -x2 index2 -p 8 -s fw
 
-# Use all available CPU cores automatically
+# split a large collapsed_reads.fasta into multiple chuncks for bwa alignment leveraging batchtools to accelerate alignment (currently support LSF-managed HPC cluster)
 chira_map.py -i collapsed_reads.fasta -o mapping_output \
-  -f1 ref1.fasta -f2 ref2.fasta -b -a bwa -s both -p 0
+   -f1 target_transcriptome.fasta -f2 mature_mirna_hsa.fasta \
+   -b -a bwa -p 8 --chunk_fasta 4 \
+  --parallel_chunks 4 --use_batchtools --batchtools_queue long \
+  --batchtools_core 8 --batchtools_memory 64GB \
+  --batchtools_walltime 48:00 -s fw \
+  --batchtools_max_parallel 4 --batchtools_conda_env ~/miniconda3/envs/chira
 ```
 
-**Input:** Collapsed FASTA file  
-**Output:** BAM files and `mapped.bed` file with all alignments
+**Output:** `sorted.bam` BAM files, `sorted.bed` file with all alignments, and `unmapped.fasta` file
 
 ---
 
@@ -403,19 +360,14 @@ Merge overlapping alignments into loci:
 
 ```bash
 # Using 8 processes for parallel transcript processing
-chira_merge.py -b mapping_output/mapped.bed -o merge_output \
-  -g combined_annotation.gtf -f1 ref1.fasta -f2 ref2.fasta \
-  -ao 0.7 -so 0.7 -p 8
-
-# Auto-detect CPU count (default behavior)
-# Automatically creates optimal number of chunks based on transcript count
-chira_merge.py -b mapping_output/mapped.bed -o merge_output \
-  -g combined_annotation.gtf -f1 ref1.fasta -f2 ref2.fasta \
-  -ao 0.7 -so 0.7
+chira_merge.py -b mapping_output/sorted.bed -o merge_output \
+  -g combined_annotation.gtf \
+  -f1 target_transcriptome.fasta -f2 mature_mirna_hsa.fasta  \
+  -ls 1 -p 8
 ```
 
-**Input:** `mapped.bed` from Step 3  
-**Output:** `loci.txt` file with merged alignments
+**Input:** `sorted.bed` from Step 3  
+**Output:** `genomic_exons.bed`,  `merged.bed`,  `segments.bed`, and `transcriptomic_exons.bed`
 
 ---
 
@@ -426,17 +378,13 @@ Build Chimeric Read Loci (CRLs) and quantify:
 ```bash
 # Using 8 threads for parallel EM algorithm
 chira_quantify.py -b merge_output/segments.bed \
-  -m merge_output/loci.txt -o quantify_output \
-  -cs 0.7 -ls 10 -t 8
-
-# Use all available CPU cores automatically
-chira_quantify.py -b merge_output/segments.bed \
-  -m merge_output/loci.txt -o quantify_output \
-  -cs 0.7 -ls 10 -t 0
+  -m merge_output/merged.bed -o quantify_output \
+  --build_crls_too \
+  -cs 0.7 -ls 5 -p 8
 ```
 
-**Input:** `segments.bed` and `loci.txt` from Step 4  
-**Output:** `loci.txt` with TPM values and CRL assignments
+**Input:** `merged.bed`, and `segments.bed` from Step 4  
+**Output:** `loci.counts` with TPM values and CRL assignments
 
 ---
 
@@ -446,17 +394,13 @@ Extract chimeric reads and summarize interactions:
 
 ```bash
 # Using 8 processes for parallel extraction and hybridization
-chira_extract.py -l quantify_output/loci.txt -o extract_output \
-  -f1 ref1.fasta -f2 ref2.fasta -n sample1 \
-  -g combined_annotation.gtf -r -s -tc 0.1 -sc 0.5 -p 8
-
-# Use all available CPU cores automatically
-chira_extract.py -l quantify_output/loci.txt -o extract_output \
-  -f1 ref1.fasta -f2 ref2.fasta -n sample1 \
-  -g combined_annotation.gtf -r -s -tc 0.1 -sc 0.5 -p 0
+chira_extract.py -l quantify_output/loci.counts -o extract_output \
+  -f1 target_transcriptome.fasta -f2 mature_mirna_hsa.fasta -n sample1 \
+  -g combined_annotation.gtf  -p 8 \
+  --accessibility  C --ref GRCh38.primary.assembly.fasta \
+  --hybridize --summarize
 ```
-
-**Input:** `loci.txt` from Step 5  
+**Input:** `loci.counts` from Step 5  
 **Output:** 
 - `sample1.chimeras.txt`: Individual chimeric reads
 - `sample1.singletons.txt`: Non-chimeric reads
@@ -464,71 +408,9 @@ chira_extract.py -l quantify_output/loci.txt -o extract_output \
 
 ---
 
-### Complete Workflow Example
-
-Here's a complete workflow script for a typical analysis:
-
-```bash
-#!/bin/bash
-
-# Set variables
-SAMPLE="sample1"
-SPECIES="hsa"  # human
-ENSEMBL_VERSION="110"
-
-# Step 1: Prepare references
-echo "Step 1: Preparing reference files..."
-
-# Download mature miRNA sequences (FASTA)
-download_mirbase_mature.py -s $SPECIES -o ref1.fasta
-
-# Download miRBase GFF3 (contains mature miRNA coordinates, can be used directly)
-download_mirbase_gff3.py -s $SPECIES -o mirbase.gff3
-
-download_ensembl.py -s homo_sapiens -g $ENSEMBL_VERSION -t $ENSEMBL_VERSION -o ./ensembl
-
-
-# Remove miRNAs from target transcriptome
-remove_mirna_hairpin_from_gtf.py -i ensembl/Homo_sapiens.GRCh38.$ENSEMBL_VERSION.gtf \
-  -o target_transcriptome.gtf
-extract_transcripts_from_genome.py -g target_transcriptome.gtf \
-  -f ensembl/Homo_sapiens.GRCh38.dna.primary_assembly.fa -o ref2.fasta
-
-# Combine annotations (if you have miRNA GTF)
-# concatenate_gtf.py -m mature_mirna.gtf -t target_transcriptome.gtf -o combined.gtf
-
-# Step 2: Collapse reads
-echo "Step 2: Collapsing reads..."
-chira_collapse.py -i raw_reads.fastq -o collapsed.fasta -u 12
-
-# Step 3: Map reads (using 8 processes for parallelization)
-echo "Step 3: Mapping reads..."
-chira_map.py -i collapsed.fasta -o mapping -f1 ref1.fasta -f2 ref2.fasta \
-  -b -a bwa -s both -p 8
-
-# Step 4: Merge alignments (using 8 processes for parallel transcript processing)
-echo "Step 4: Merging alignments..."
-chira_merge.py -b mapping/mapped.bed -o merge -g target_transcriptome.gtf \
-  -f1 ref1.fasta -f2 ref2.fasta -ao 0.7 -so 0.7 -p 8
-
-# Step 5: Quantify CRLs (using 8 threads for parallelization)
-echo "Step 5: Quantifying CRLs..."
-chira_quantify.py -b merge/segments.bed -m merge/loci.txt -o quantify \
-  -cs 0.7 -ls 10 -t 8
-
-# Step 6: Extract interactions (using 8 processes for parallelization)
-echo "Step 6: Extracting interactions..."
-chira_extract.py -l quantify/loci.txt -o extract -f1 ref1.fasta -f2 ref2.fasta \
-  -n $SAMPLE -g target_transcriptome.gtf -r -s -tc 0.1 -sc 0.5 -p 8
-
-echo "Analysis complete! Results in extract/"
-```
-
----
-
 ### Docker Workflow
 
-If using Docker, the workflow is similar but commands are prefixed with `docker run`. Use the pre-built image:
+If using Docker, the workflow is similar but commands are prefixed with `docker run`. Use the pre-built image using the **Dockerfile**:
 
 ```bash
 # Pull the pre-built image (first time only)
@@ -537,10 +419,6 @@ docker pull docker.io/nemat1976/chiraplus:v0.0.1
 # Run each step with volume mounts
 docker run --rm -v $(pwd)/data:/app/data -v $(pwd)/output:/app/output \
   docker.io/nemat1976/chiraplus:v0.0.1 chira_collapse.py -i data/input.fastq -o output/collapsed.fasta
-
-docker run --rm -v $(pwd)/data:/app/data -v $(pwd)/output:/app/output \
-  docker.io/nemat1976/chiraplus:v0.0.1 chira_map.py -i output/collapsed.fasta -o output/mapping \
-  -f1 data/ref1.fasta -f2 data/ref2.fasta -b -a bwa
 
 # ... continue with remaining steps
 ```
@@ -604,32 +482,35 @@ chira_collapse.py -i input.fastq -o output.fasta -u 12
 
 **Split Reference:**
 A split reference uses two separate reference FASTA files instead of one combined file. This is useful for:
-- **Separating different RNA types**: For example, use `ref_fasta1` for miRNA sequences and `ref_fasta2` for target transcript sequences
+- **Separating different RNA types**: For example, use `ref_fasta1` for target transcript sequences and `ref_fasta2` for miRNA sequences
 - **Better chimeric detection**: Helps identify chimeric reads that span between the two reference types (e.g., miRNA-target interactions)
 - **Smaller indices**: Each reference can be indexed separately, potentially reducing memory usage
 
 **How to prepare a split reference:**
 1. **Create two separate FASTA files:**
-   - `ref1.fasta`: First priority reference (e.g., mature miRNA sequences from [miRBase](https://www.mirbase.org/))
-   - `ref2.fasta`: Second priority reference (e.g., target transcript sequences)
-   
+
+   - `ref1.fasta`: First priority reference (e.g., target transcript sequences)
+   - `ref2.fasta`: SEcond priority reference (e.g., mature miRNA sequences from [miRBase](https://www.mirbase.org/)). Notes: convert "U" to "T" is necessary.
+  
    **Important:** When preparing `ref2.fasta` (target transcripts):
    - **Remove mature miRNA sequences** from the target transcript reference
    - **Remove miRNA hairpin sequences** from the target transcript reference
    - This prevents false-positive chimeric alignments where miRNA sequences align to both references
 
 2. **Prepare GTF/GFF annotation file:**
-   - **Include mature miRNA annotations** (e.g., `3p_mature_mir`, `5p_mature_mir`, `mature_mir`) download .gff3 from miRBase Downloads: https://www.mirbase.org/download/
-   - **Exclude miRNA hairpin annotations** to avoid confusion
+   - **Include only mature miRNA annotations** (e.g., `3p_mature_mir`, `5p_mature_mir`, `mature_mir`) download .gff3 from miRBase Downloads: https://www.mirbase.org/download/
    - This ensures proper identification of miRNA vs target loci in downstream analysis
 
 3. **Option A - Build indices automatically:**
+
    ```bash
    chira_map.py -i reads.fasta -o output_dir -f1 ref1.fasta -f2 ref2.fasta -b -a bwa
    ```
+
    The `-b` flag will automatically build indices for both references.
 
 4. **Option B - Pre-build indices (recommended for repeated use):**
+
    ```bash
    # Build index1
    bwa index -p index1 ref1.fasta
@@ -656,10 +537,10 @@ A split reference uses two separate reference FASTA files instead of one combine
 - `-s1, --align_score1`: Minimum alignment score for 1st iteration (default: 18)
 - `-s2, --align_score2`: Minimum alignment score for 2nd iteration (default: 16)
 - `-co, --chimeric_overlap`: Max bases between chimeric segments (default: 2)
-- `-p, --processes`: Total number of CPU processes/threads to use (default: auto-detects CPU count)
+- `-p, --processes`: Total number of CPU processes/threads to use (default: auto-detects CPU count) for the main job.
   - **Automatic distribution**: The script automatically divides total processes among parallel BWA jobs
     - **Without chunking**: Total processes divided among parallel BWA jobs (2-4 jobs depending on indices)
-    - **With chunking**: Total processes divided among parallel chunks, then each chunk uses its allocated processes
+    - **With chunking**: Total processes divided among parallel chunks, then each chunk uses its allocated processes specified by `--batchtools_cores`
   - **Multi-threading**: Enables parallel processing for `samtools view`, `pysam.merge`, `pysam.sort`, and `sort` commands
   - **Performance**: 2-4x faster for large BAM files and sorting operations
   - **Memory optimization**: Use `--sort_memory` to specify memory per thread (e.g., "2G", "3G"), or install `psutil` for automatic optimization
@@ -674,14 +555,10 @@ A split reference uses two separate reference FASTA files instead of one combine
     - Processes chunks in batches, with parallel execution controlled by `--parallel_chunks` (default: 2)
     - Each chunk processes all BWA jobs sequentially
     - Remaining chunks are processed in subsequent batches automatically
-  - **Example 1**: `--chunk_fasta 10 --processes 32 --parallel_chunks 2` (default)
+  - **Example 1**: `--chunk_fasta 10 --batchtools_cores 8 --batchtools_memory 64GB --parallel_chunks 2` (default)
     - Creates 10 chunks from FASTA
-    - Runs 2 chunks in parallel (16 processes each, using all 32 processes)
+    - Runs 2 chunks in parallel (8 processes/8GB each)
     - Processes remaining 8 chunks in subsequent batches of 2
-  - **Example 2**: `--chunk_fasta 10 --processes 32 --parallel_chunks 4`
-    - Creates 10 chunks from FASTA
-    - Runs 4 chunks in parallel (8 processes each, using all 32 processes)
-    - Processes remaining 6 chunks in subsequent batches of 4
   - **Benefits**: Better I/O performance and memory efficiency for large datasets
   - Each chunk is processed independently through all BWA jobs, then results are merged
 - `--parallel_chunks`: Number of chunks to process simultaneously when using `--chunk_fasta` (default: 2)
@@ -694,8 +571,7 @@ A split reference uses two separate reference FASTA files instead of one combine
   - **Memory consideration**: Each chunk needs ~2-4GB RAM, so total memory ≈ `parallel_chunks × 4GB`
   - **CPU consideration**: Processes per chunk = `--processes / --parallel_chunks`
     - Each chunk should get at least 4 processes for optimal BWA performance
-    - Example: `--processes 32 --parallel_chunks 4` → 8 processes per chunk (good)
-    - Example: `--processes 8 --parallel_chunks 4` → 2 processes per chunk (too few, will auto-reduce)
+    - Example: `--batchtools_cores 8 --parallel_chunks 4` → 8 processes per chunk (good)
   - **Note**: Only takes effect when `--chunk_fasta` is specified
 - `--use_batchtools`: Enable batchtools for HPC cluster job submission (optional, for LSF/SLURM clusters)
   - **Requirements**: R with `batchtools` and `jsonlite` R packages installed
@@ -723,10 +599,6 @@ A split reference uses two separate reference FASTA files instead of one combine
 chira_map.py -i reads.fasta -o output_dir \
    -f1 ref1.fasta -f2 ref2.fasta -a bwa -s both -p 32
 
-# Use all available CPU cores automatically (default behavior)
-chira_map.py -i reads.fasta -o output_dir \
-   -f1 ref1.fasta -f2 ref2.fasta -a bwa -s both
-
 # With manual memory specification for BAM sorting
 chira_map.py -i reads.fasta -o output_dir \
    -f1 ref1.fasta -f2 ref2.fasta -a bwa -s both -p 8 --sort_memory 3G
@@ -736,19 +608,14 @@ chira_map.py -i reads.fasta -o output_dir \
 chira_map.py -i large_reads.fasta -o output_dir \
    -f1 ref1.fasta -f2 ref2.fasta -a bwa -s both -p 32 --chunk_fasta 10
 
-# Example 1: Default behavior (2 chunks in parallel)
-# - Creates 10 chunks from FASTA
-# - Runs 2 chunks in parallel (16 processes each, using all 32 processes)
-# - Processes remaining 8 chunks in subsequent batches of 2
-
-# Example 2: Custom parallel chunks (4 chunks in parallel)
+# Example 1: Custom parallel chunks (4 chunks in parallel)
 # - Creates 10 chunks from FASTA
 # - Runs 4 chunks in parallel (8 processes each, using all 32 processes)
 # - Processes remaining 6 chunks in subsequent batches of 4
 chira_map.py -i large_reads.fasta -o output_dir \
-   -f1 ref1.fasta -f2 ref2.fasta -a bwa -s both -p 32 --chunk_fasta 10 --parallel_chunks 4
+   -f1 ref1.fasta -f2 ref2.fasta -a bwa -s both -p 8 --chunk_fasta 10 --parallel_chunks 4
 
-# Example 3: Using batchtools for HPC cluster submission (LSF)
+# Example 2: Using batchtools for HPC cluster submission (LSF)
 # - Splits FASTA into 20 chunks
 # - Submits 20 independent LSF jobs (one per chunk)
 # - Each job runs on different cluster node with 8 cores and 8GB memory
@@ -876,7 +743,7 @@ chira_merge.py -b mapped.bed -o output_dir -g annotation.gtf -f1 ref1.fasta -ao 
 - `-ls, --min_locus_size`: Minimum reads per locus to participate in CRL creation (default: 10)
 - `-e, --em_threshold`: EM algorithm convergence threshold (default: 0.00001)
 - `-crl, --build_crls_too`: Create CRLs in addition to quantification
-- `-t, --threads`: Number of processes for parallel processing (default: 1, use 0 for all available cores)
+- `-p, --processes`: Number of processes for parallel processing (default: 1, use 0 for all available cores)
   - **Multiprocessing**: Uses MPIRE WorkerPool to parallelize EM algorithm E-step (multimapped reads) and aggregation step (bypasses Python GIL)
   - **MPIRE benefits**: 50-90% memory reduction, 2-3x faster startup, better performance (required dependency)
   - **Performance**: 2-8x faster for large datasets with many multimapping reads
@@ -1010,7 +877,7 @@ Header columns (14 total):
 
 **3. `{sample_name}.interactions.txt`** - Tabular file with detected interactions (if `--summarize` used). This file is always uncompressed for compatibility with downstream analysis tools.
 
-Header columns (24 total):
+Header columns (26 total):
 - `supporting_read_count`: Number of reads supporting this interaction
 - `locus_1_chromosome`, `locus_1_start`, `locus_1_end`, `locus_1_strand`: Genomic coordinates for locus 1
 - `locus_2_chromosome`, `locus_2_start`, `locus_2_end`, `locus_2_strand`: Genomic coordinates for locus 2
@@ -1019,7 +886,7 @@ Header columns (24 total):
 - `hybridization_mfe_kcal_mol`: Minimum free energy of hybridization in kcal/mol (or `NA`)
 - `hybridized_sequence_segments`: Hybridized sequence segments (format: `seq1\tseq2`, or `NA\tNA`)
 - `hybridization_start_positions`: Start positions of hybridization within sequences (format: `pos1&pos2`, or `NA`)
-- `hybridization_genomic_coordinates`: Genomic coordinates of hybridization region (format: `chr1:start1:end1:strand1\tchr2:start2:end2:strand2`, or `NA`)
+- `hybridization_genomic_coordinates`: Genomic coordinates of hybridization region (tab-delimited format: `refid1:ref_start1-ref_end1:ref_strand1&refid2:ref_start2-ref_end2:ref_strand2`, or `NA`)
 - `tpm_locus_1`, `tpm_locus_2`: TPM values for each locus
 - `tpm_combined`: Combined TPM (tpm1 + tpm2)
 - `alignment_score_locus_1`, `alignment_score_locus_2`: Alignment scores for each locus
@@ -1040,8 +907,6 @@ chira_extract.py -l loci.txt -o output_dir -f1 ref1.fasta -n sample1 \
   -g annotation.gtf -r -s -tc 0.1 -sc 0.5 --gzip
 ```
 
-**Note:** The interactions file includes comments explaining how to identify miRNA vs target loci based on the `annotation_region_locus_1` and `annotation_region_locus_2` fields. miRNA annotations typically include: `miRNA`, `3p_mature_mir`, `5p_mature_mir`, `mature_mir`.
-
 ---
 
 ## Utility Scripts
@@ -1051,7 +916,7 @@ The following utility scripts are provided to help prepare reference files and a
 
 ### download_ensembl.py
 
-**Description:** Downloads cDNA, ncRNA, GTF, and genome FASTA files from Ensembl for a given species and release versions.
+**Description:** Downloads GTF and genome FASTA files from Ensembl for a given species and release versions.
 
 **Key Features:**
 - Downloads primary assembly genome FASTA (not toplevel)
@@ -1229,7 +1094,7 @@ extract_transcripts_from_genome.py -g target_transcriptome.gtf \
 **Description:** Concatenates mature miRNA GTF/GFF3 file with target transcriptome GTF file, removing comment lines from the miRNA GTF.
 
 **Key Features:**
-- Combines miRNA and target GTF files for split-reference analysis
+- Combines miRNA GFF3 and target GTF files for split-reference analysis
 - Removes comment lines from miRNA GTF
 - Optionally removes comment lines from target GTF
 - Note: miRBase provides GFF3 format, which ChiRA can handle directly. This script accepts GTF format.
