@@ -981,181 +981,197 @@ def quantify_crls_sqlite(crl_file, em_threshold, num_processes=1):
     if os.path.exists(db_file):
         os.remove(db_file)
     
-    conn = sqlite3.connect(db_file)
-    cursor = conn.cursor()
-    
-    # Optimize SQLite settings for performance
-    conn.execute('PRAGMA journal_mode=WAL')
-    conn.execute('PRAGMA synchronous=NORMAL')
-    conn.execute('PRAGMA cache_size=-256000')  # 256MB cache
-    conn.execute('PRAGMA temp_store=MEMORY')
-    conn.execute('PRAGMA mmap_size=268435456')  # 256MB mmap
-    
-    print(f"Creating SQLite database: {db_file}", file=sys.stderr)
-    
-    # Create tables (without indexes initially for faster bulk loading)
-    cursor.execute('''
+    conn = None
+    try:
+        conn = sqlite3.connect(db_file)
+        cursor = conn.cursor()
+        
+        # Optimize SQLite settings for performance
+        conn.execute('PRAGMA journal_mode=WAL')
+        conn.execute('PRAGMA synchronous=NORMAL')
+        conn.execute('PRAGMA cache_size=-256000')  # 256MB cache
+        conn.execute('PRAGMA temp_store=MEMORY')
+        conn.execute('PRAGMA mmap_size=268435456')  # 256MB mmap
+        
+        print(f"Creating SQLite database: {db_file}", file=sys.stderr)
+        
+        # Create tables (without indexes initially for faster bulk loading)
+        cursor.execute('''
         CREATE TABLE alpha (
             readid TEXT NOT NULL,
             crlid TEXT NOT NULL,
             value REAL NOT NULL DEFAULT 0.0,
             PRIMARY KEY (readid, crlid)
         )
-    ''')
-    
-    # Table for locus lengths (small, can stay in memory or SQLite)
-    cursor.execute('''
+        ''')
+        
+        # Table for locus lengths (small, can stay in memory or SQLite)
+        cursor.execute('''
         CREATE TABLE crl_loci_len (
             crlid TEXT NOT NULL,
             locusid TEXT NOT NULL,
             length INTEGER NOT NULL,
             PRIMARY KEY (crlid, locusid)
         )
-    ''')
-    
-    # Load data into database with optimized bulk loading
-    print("Loading data into SQLite database...", file=sys.stderr)
-    d_crl_loci_len = defaultdict(lambda: defaultdict(int))
-    
-    # Disable some safety features during bulk load for speed
-    conn.execute('PRAGMA synchronous=OFF')
-    conn.execute('PRAGMA journal_mode=MEMORY')
-    
-    # Use batch inserts for better performance
-    BATCH_SIZE = 100000
-    alpha_batch = []
-    loci_batch = []
-    line_count = 0
-    
-    for line in read_file_lines_mmap(crl_file):
-        f = line.rstrip("\n").split("\t")
-        if len(f) < 10:
-            continue
+        ''')
         
-        readid = f[0]
-        locusid = f[2]
-        crlid = f[3]
-        pos = f[9].split(':')
+        # Load data into database with optimized bulk loading
+        print("Loading data into SQLite database...", file=sys.stderr)
+        d_crl_loci_len = defaultdict(lambda: defaultdict(int))
         
-        if len(pos) < 3:
-            continue
-        try:
-            locuslength = int(pos[-2]) - int(pos[-3]) + 1
-        except (ValueError, IndexError):
-            continue
+        # Disable some safety features during bulk load for speed
+        conn.execute('PRAGMA synchronous=OFF')
+        conn.execute('PRAGMA journal_mode=MEMORY')
         
-        # Batch insert alpha
-        alpha_batch.append((readid, crlid, 1.0))
-        d_crl_loci_len[crlid][locusid] = locuslength
-        loci_batch.append((crlid, locusid, locuslength))
+        # Use batch inserts for better performance
+        BATCH_SIZE = 100000
+        alpha_batch = []
+        loci_batch = []
+        line_count = 0
         
-        # Insert in batches
-        if len(alpha_batch) >= BATCH_SIZE:
-            cursor.executemany('INSERT INTO alpha VALUES (?, ?, ?)', alpha_batch)
+        for line in read_file_lines_mmap(crl_file):
+            f = line.rstrip("\n").split("\t")
+            if len(f) < 10:
+                continue
+            
+            readid = f[0]
+            locusid = f[2]
+            crlid = f[3]
+            pos = f[9].split(':')
+            
+            if len(pos) < 3:
+                continue
+            try:
+                locuslength = int(pos[-2]) - int(pos[-3]) + 1
+            except (ValueError, IndexError):
+                continue
+            
+            # Batch insert alpha
+            alpha_batch.append((readid, crlid, 1.0))
+            d_crl_loci_len[crlid][locusid] = locuslength
+            loci_batch.append((crlid, locusid, locuslength))
+            
+            # Insert in batches (OR REPLACE: loci file can have multiple lines per (readid, crlid))
+            if len(alpha_batch) >= BATCH_SIZE:
+                cursor.executemany('INSERT OR REPLACE INTO alpha VALUES (?, ?, ?)', alpha_batch)
+                cursor.executemany('INSERT OR REPLACE INTO crl_loci_len VALUES (?, ?, ?)', loci_batch)
+                conn.commit()
+                alpha_batch = []
+                loci_batch = []
+                line_count += BATCH_SIZE
+                if line_count % 1000000 == 0:
+                    print(f"  Loaded {line_count:,} lines...", file=sys.stderr)
+        
+        # Insert remaining
+        if alpha_batch:
+            cursor.executemany('INSERT OR REPLACE INTO alpha VALUES (?, ?, ?)', alpha_batch)
             cursor.executemany('INSERT OR REPLACE INTO crl_loci_len VALUES (?, ?, ?)', loci_batch)
             conn.commit()
-            alpha_batch = []
-            loci_batch = []
-            line_count += BATCH_SIZE
-            if line_count % 1000000 == 0:
-                print(f"  Loaded {line_count:,} lines...", file=sys.stderr)
-    
-    # Insert remaining
-    if alpha_batch:
-        cursor.executemany('INSERT INTO alpha VALUES (?, ?, ?)', alpha_batch)
-        cursor.executemany('INSERT OR REPLACE INTO crl_loci_len VALUES (?, ?, ?)', loci_batch)
-        conn.commit()
-        line_count += len(alpha_batch)
-    
-    print(f"Database loaded. Total lines: {line_count:,}", file=sys.stderr)
-    
-    # Re-enable safety features
-    conn.execute('PRAGMA synchronous=NORMAL')
-    conn.execute('PRAGMA journal_mode=WAL')
-    conn.commit()  # Ensure all data is written before creating indexes
-    
-    # Create indexes after bulk load (much faster than maintaining during inserts)
-    print("Creating indexes...", file=sys.stderr)
-    cursor.execute('CREATE INDEX idx_readid ON alpha(readid)')
-    cursor.execute('CREATE INDEX idx_crlid ON alpha(crlid)')
-    cursor.execute('CREATE INDEX idx_crl_loci_crlid ON crl_loci_len(crlid)')
-    conn.commit()
-    print("Indexes created.", file=sys.stderr)
-    
-    # Initialize d_rho uniformly
-    print("Initializing d_rho...", file=sys.stderr)
-    d_rho = defaultdict(float)
-    
-    # Count CRLs per read and initialize uniformly
-    cursor.execute('''
-        SELECT readid, COUNT(*) as num_crls
-        FROM alpha
-        GROUP BY readid
-    ''')
-    
-    total_reads = 0
-    updates = []
-    for readid, num_crls in cursor.fetchall():
-        inv_num_crls = 1.0 / float(num_crls)
-        # Get CRLs for this read
-        cursor.execute('SELECT crlid FROM alpha WHERE readid = ?', (readid,))
-        for (crlid,) in cursor.fetchall():
-            updates.append((inv_num_crls, readid, crlid))
-            d_rho[crlid] += inv_num_crls
+            line_count += len(alpha_batch)
         
-        total_reads += 1
-        if total_reads % 100000 == 0:
-            if updates:
-                cursor.executemany('UPDATE alpha SET value = ? WHERE readid = ? AND crlid = ?', updates)
-                conn.commit()
-                updates = []
-            print(f"  Processed {total_reads:,} reads...", file=sys.stderr)
-    
-    # Apply remaining updates
-    if updates:
-        cursor.executemany('UPDATE alpha SET value = ? WHERE readid = ? AND crlid = ?', updates)
+        print(f"Database loaded. Total lines: {line_count:,}", file=sys.stderr)
+        
+        # Re-enable safety features
+        conn.execute('PRAGMA synchronous=NORMAL')
+        conn.execute('PRAGMA journal_mode=WAL')
+        conn.commit()  # Ensure all data is written before creating indexes
+        
+        # Create indexes after bulk load (much faster than maintaining during inserts)
+        print("Creating indexes...", file=sys.stderr)
+        cursor.execute('CREATE INDEX idx_readid ON alpha(readid)')
+        cursor.execute('CREATE INDEX idx_crlid ON alpha(crlid)')
+        cursor.execute('CREATE INDEX idx_crl_loci_crlid ON crl_loci_len(crlid)')
         conn.commit()
-    
-    # Normalize d_rho
-    library_size = sum(d_rho.values())
-    if library_size > 0:
-        inv_library_size = 1.0 / float(library_size)
-        for crlid in d_rho:
-            d_rho[crlid] *= inv_library_size
-    
-    # Run EM algorithm
-    print("Starting EM algorithm...", file=sys.stderr)
-    d_rho = em_sqlite(conn, db_file, d_rho, library_size, em_threshold, num_processes)
-    
-    # Compute final d_crl_expression
-    print("Computing CRL expressions...", file=sys.stderr)
-    d_crl_expression = defaultdict(float)
-    
-    cursor.execute('SELECT readid, crlid, value FROM alpha')
-    for readid, crlid, value in cursor.fetchall():
-        d_crl_expression[crlid] += value
-    
-    d_crl_tpm = tpm(d_crl_expression, d_crl_loci_len)
-    
-    # Extract d_read_crl_fractions from database
-    print("Extracting read-CRL fractions...", file=sys.stderr)
-    d_read_crl_fractions = defaultdict(lambda: defaultdict(float))
-    
-    cursor.execute('SELECT readid, crlid, value FROM alpha ORDER BY readid')
-    for readid, crlid, value in cursor.fetchall():
-        d_read_crl_fractions[readid][crlid] = value
-    
-    # Cleanup
-    conn.close()
-    if os.path.exists(db_file):
-        os.remove(db_file)
-    # Also remove WAL and SHM files
-    for suffix in ['.db-wal', '.db-shm']:
-        wal_file = db_file + suffix
-        if os.path.exists(wal_file):
-            os.remove(wal_file)
-    
-    return d_read_crl_fractions, d_crl_tpm
+        print("Indexes created.", file=sys.stderr)
+        
+        # Initialize d_rho uniformly
+        print("Initializing d_rho...", file=sys.stderr)
+        d_rho = defaultdict(float)
+        
+        # Count CRLs per read and initialize uniformly
+        cursor.execute('''
+            SELECT readid, COUNT(*) as num_crls
+            FROM alpha
+            GROUP BY readid
+        ''')
+        
+        total_reads = 0
+        updates = []
+        for readid, num_crls in cursor.fetchall():
+            inv_num_crls = 1.0 / float(num_crls)
+            # Get CRLs for this read
+            cursor.execute('SELECT crlid FROM alpha WHERE readid = ?', (readid,))
+            for (crlid,) in cursor.fetchall():
+                updates.append((inv_num_crls, readid, crlid))
+                d_rho[crlid] += inv_num_crls
+            
+            total_reads += 1
+            if total_reads % 100000 == 0:
+                if updates:
+                    cursor.executemany('UPDATE alpha SET value = ? WHERE readid = ? AND crlid = ?', updates)
+                    conn.commit()
+                    updates = []
+                print(f"  Processed {total_reads:,} reads...", file=sys.stderr)
+        
+        # Apply remaining updates
+        if updates:
+            cursor.executemany('UPDATE alpha SET value = ? WHERE readid = ? AND crlid = ?', updates)
+            conn.commit()
+        
+        # Normalize d_rho
+        library_size = sum(d_rho.values())
+        if library_size > 0:
+            inv_library_size = 1.0 / float(library_size)
+            for crlid in d_rho:
+                d_rho[crlid] *= inv_library_size
+        
+        # Run EM algorithm
+        print("Starting EM algorithm...", file=sys.stderr)
+        d_rho = em_sqlite(conn, db_file, d_rho, library_size, em_threshold, num_processes)
+        
+        # Compute final d_crl_expression
+        print("Computing CRL expressions...", file=sys.stderr)
+        d_crl_expression = defaultdict(float)
+        
+        cursor.execute('SELECT readid, crlid, value FROM alpha')
+        for readid, crlid, value in cursor.fetchall():
+            d_crl_expression[crlid] += value
+        
+        d_crl_tpm = tpm(d_crl_expression, d_crl_loci_len)
+        
+        # Extract d_read_crl_fractions from database
+        print("Extracting read-CRL fractions...", file=sys.stderr)
+        d_read_crl_fractions = defaultdict(lambda: defaultdict(float))
+        
+        cursor.execute('SELECT readid, crlid, value FROM alpha ORDER BY readid')
+        for readid, crlid, value in cursor.fetchall():
+            d_read_crl_fractions[readid][crlid] = value
+        
+        return d_read_crl_fractions, d_crl_tpm
+    finally:
+        # Cleanup: Always remove database files, even if an exception occurs
+        # This ensures temporary files don't accumulate on disk
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass  # Ignore errors when closing connection
+        
+        # Remove main database file
+        if os.path.exists(db_file):
+            try:
+                os.remove(db_file)
+            except OSError as e:
+                print(f"Warning: Could not remove database file {db_file}: {e}", file=sys.stderr)
+        
+        # Also remove WAL and SHM files (SQLite auxiliary files)
+        for suffix in ['.db-wal', '.db-shm']:
+            wal_file = db_file + suffix
+            if os.path.exists(wal_file):
+                try:
+                    os.remove(wal_file)
+                except OSError as e:
+                    print(f"Warning: Could not remove database file {wal_file}: {e}", file=sys.stderr)
 
 
 def print_configuration(args):

@@ -31,16 +31,16 @@ except ImportError:
     # Fallback for older Biopython versions that don't have BiopythonDeprecationWarning
     warnings.filterwarnings("ignore", message=".*UnknownSeq.*deprecated.*", category=DeprecationWarning)
 
-
 # MPIRE is REQUIRED for multiprocessing performance
 # MPIRE provides shared objects, lower overhead, and better performance than Process
 # Benefits: 50-90% memory reduction, 2-3x faster startup, better performance
 # Install with: pip install mpire (or pip install chira, or conda install -c conda-forge mpire)
 # Note: Requires MPIRE >= 2.4.0 for shared_objects support
-from mpire import WorkerPool
 # Note: MPIRE 2.10.1+ doesn't use a SharedObject class
 # Shared objects are passed directly to WorkerPool via shared_objects parameter
 # See: https://sybrenjansen.github.io/mpire/v2.10.1/usage/workerpool/shared_objects.html
+
+from mpire import WorkerPool
 
 
 d_gene_annotations = defaultdict(lambda: defaultdict(str))
@@ -1052,88 +1052,6 @@ def build_interval_trees():
             d_transcript_interval_trees[transcript_id]['CDS'] = cds_tree
 
 
-def create_read_index(crl_file, index_file=None):
-    """
-    Create an index file mapping read_id -> (file_position, line_count).
-    
-    OPTIMIZATION: This allows processes to jump directly to their chunk instead of
-    scanning the entire file sequentially. For a 44GB file with 8 processes, this
-    reduces I/O from 352GB (8 × 44GB) to ~44GB (one read per process).
-    
-    Args:
-        crl_file: Path to loci.counts file
-        index_file: Path to index file (default: crl_file + '.idx')
-    
-    Returns:
-        Tuple of (read_index_dict, read_list) where:
-        - read_index_dict: {read_id: (file_position, line_count)}
-        - read_list: List of read_ids in order
-    """
-    if index_file is None:
-        index_file = crl_file + '.idx'
-    
-    # Check if index exists and is up-to-date
-    if os.path.exists(index_file):
-        # Check file modification time
-        crl_mtime = os.path.getmtime(crl_file)
-        idx_mtime = os.path.getmtime(index_file)
-        if idx_mtime >= crl_mtime:
-            # Index is up-to-date, load it
-            print(f"Loading existing read index: {index_file}", file=sys.stderr)
-            with open(index_file, 'rb') as f:
-                read_index_dict, read_list = pickle.load(f)
-            print(f"Loaded index for {len(read_list):,} reads", file=sys.stderr)
-            return read_index_dict, read_list
-    
-    # Create new index
-    print(f"Creating read index for {crl_file}...", file=sys.stderr)
-    read_index_dict = {}
-    read_list = []
-    prev_readid = None
-    current_pos = 0
-    line_count = 0
-    
-    BUFFER_SIZE = 2 * 1024 * 1024  # 2MB buffer
-    with open(crl_file, "rb", buffering=BUFFER_SIZE) as fh_crl_file:
-        # Read in binary mode to get accurate file positions
-        for line_bytes in fh_crl_file:
-            line_str = line_bytes.decode('utf-8', errors='replace')
-            f = line_str.rstrip('\n').split('\t')
-            if len(f) < 1:
-                current_pos = fh_crl_file.tell()
-                continue
-            
-            readid = '|'.join(f[0].split("|")[:-1])
-            
-            if readid != prev_readid:
-                if prev_readid is not None:
-                    # Save position of previous read's first line
-                    read_index_dict[prev_readid] = (read_index_dict[prev_readid][0], line_count)
-                    line_count = 0
-                
-                # New read - record its starting position
-                if readid not in read_index_dict:
-                    read_index_dict[readid] = (current_pos, 0)
-                    read_list.append(readid)
-                
-                prev_readid = readid
-            
-            line_count += 1
-            current_pos = fh_crl_file.tell()
-        
-        # Handle last read
-        if prev_readid is not None:
-            read_index_dict[prev_readid] = (read_index_dict[prev_readid][0], line_count)
-    
-    # Save index
-    print(f"Saving read index to {index_file}...", file=sys.stderr)
-    with open(index_file, 'wb') as f:
-        pickle.dump((read_index_dict, read_list), f)
-    
-    print(f"Created index for {len(read_list):,} reads", file=sys.stderr)
-    return read_index_dict, read_list
-
-
 def parse_counts_file(crl_file, tpm_cutoff):
     d_crl_tpm = defaultdict(float)
     l_loci_bed = set()
@@ -1878,6 +1796,15 @@ def main():
     # Write interaction summary if requested
     if args.summarize:
         write_interaction_summary(args.outdir, args.sample_name, args.compress, args.processes)
+    
+    # Cleanup: Remove index file (no longer needed after processing)
+    index_file = args.crl_file + '.idx'
+    if os.path.exists(index_file):
+        try:
+            os.remove(index_file)
+            print(f"Removed index file: {index_file}", file=sys.stderr)
+        except OSError as e:
+            print(f"Warning: Could not remove index file {index_file}: {e}", file=sys.stderr)
 
 
 if __name__ == "__main__":
