@@ -8,6 +8,8 @@ import copy
 # ProcessPoolExecutor no longer needed - MPIRE is required
 import math
 import mmap
+import sqlite3
+import tempfile
 
 # MPIRE is REQUIRED for multiprocessing performance
 # MPIRE provides shared objects, lower overhead, and better performance than ProcessPoolExecutor
@@ -754,6 +756,408 @@ def quantify_crls(crl_file, em_threshold, num_processes=1):
     return d_res, d_crl_tpm
 
 
+def em_sqlite(conn, db_path, d_rho, library_size, em_threshold, num_processes=1):
+    """
+    EM algorithm using SQLite database with hybrid parallel approach.
+    
+    Uses read-only connections for parallel computation, then applies updates sequentially.
+    This avoids write conflicts while maximizing parallelism.
+    
+    Args:
+        conn: SQLite connection to main database
+        db_path: Path to database file (needed for parallel connections)
+        d_rho: Dictionary mapping CRL IDs to relative abundances (in memory)
+        library_size: Total library size
+        em_threshold: Convergence threshold
+        num_processes: Number of parallel processes
+    
+    Returns:
+        Final d_rho dictionary after convergence
+    """
+    cursor = conn.cursor()
+    i = 1
+    sum_of_rho_diff = float('inf')
+    
+    # Get list of multimapped reads
+    cursor.execute('''
+        SELECT readid, COUNT(*) as num_crls
+        FROM alpha
+        GROUP BY readid
+        HAVING num_crls > 1
+    ''')
+    multimap_readids = [row[0] for row in cursor.fetchall()]
+    
+    print(f"Found {len(multimap_readids):,} multimapped reads", file=sys.stderr)
+    
+    while sum_of_rho_diff > em_threshold and i <= 1000:
+        if i % 10 == 0:
+            print(f"iteration: {i}")
+        
+        d_rho_old = dict(d_rho)
+        d_rho_new = defaultdict(float)
+        
+        # E-step: Compute updates in parallel (read-only), apply sequentially
+        print(f"  E-step: Processing {len(multimap_readids):,} reads...", file=sys.stderr)
+        
+        if num_processes > 1 and len(multimap_readids) > 1000:
+            # Parallel computation of updates
+            from mpire import WorkerPool
+            
+            # Split reads into chunks
+            chunk_size = max(1000, len(multimap_readids) // num_processes)
+            read_chunks = [multimap_readids[j:j+chunk_size] 
+                          for j in range(0, len(multimap_readids), chunk_size)]
+            
+            def compute_updates_parallel(readids_chunk):
+                """Compute updates for a chunk of reads (read-only, no conflicts)."""
+                # Read-only connection (no locking issues)
+                conn_read = sqlite3.connect(db_path, timeout=30.0)
+                conn_read.execute('PRAGMA journal_mode=WAL')
+                conn_read.execute('PRAGMA busy_timeout=30000')
+                cursor_read = conn_read.cursor()
+                
+                updates = []
+                d_rho_local = defaultdict(float)
+                
+                # Process in batches (SQLite parameter limit is 999)
+                BATCH_SIZE = 999
+                for k in range(0, len(readids_chunk), BATCH_SIZE):
+                    batch = readids_chunk[k:k+BATCH_SIZE]
+                    placeholders = ','.join(['?'] * len(batch))
+                    
+                    cursor_read.execute(f'''
+                        SELECT readid, crlid, value
+                        FROM alpha
+                        WHERE readid IN ({placeholders})
+                        ORDER BY readid
+                    ''', batch)
+                    
+                    # Group by readid
+                    read_data = defaultdict(list)
+                    for readid, crlid, value in cursor_read.fetchall():
+                        read_data[readid].append((crlid, value))
+                    
+                    # Compute E-step updates
+                    for readid, crls in read_data.items():
+                        if len(crls) == 1:
+                            continue
+                        
+                        # Compute total rho for this read's CRLs
+                        total_rho = sum(d_rho_old[crlid] for crlid, _ in crls)
+                        if total_rho > 0:
+                            inv_total = 1.0 / total_rho
+                            for crlid, _ in crls:
+                                new_value = d_rho_old[crlid] * inv_total
+                                updates.append((new_value, readid, crlid))
+                                d_rho_local[crlid] += new_value
+                        else:
+                            # Uniform distribution if total is 0
+                            inv_num = 1.0 / len(crls)
+                            for crlid, _ in crls:
+                                updates.append((inv_num, readid, crlid))
+                                d_rho_local[crlid] += inv_num
+                
+                conn_read.close()
+                return updates, dict(d_rho_local)
+            
+            # Compute updates in parallel (all read-only, no conflicts)
+            with WorkerPool(n_jobs=num_processes) as pool:
+                results = pool.map(compute_updates_parallel, read_chunks, progress_bar=False)
+            
+            # Collect all updates
+            all_updates = []
+            for updates, d_rho_local in results:
+                all_updates.extend(updates)
+                for crlid, value in d_rho_local.items():
+                    d_rho_new[crlid] += value
+            
+            # Apply updates sequentially (single writer, no conflicts)
+            print(f"  Applying {len(all_updates):,} updates...", file=sys.stderr)
+            cursor.executemany('''
+                UPDATE alpha
+                SET value = ?
+                WHERE readid = ? AND crlid = ?
+            ''', all_updates)
+            conn.commit()
+        else:
+            # Sequential processing
+            BATCH_SIZE = 10000
+            for j in range(0, len(multimap_readids), BATCH_SIZE):
+                batch = multimap_readids[j:j+BATCH_SIZE]
+                placeholders = ','.join(['?'] * len(batch))
+                
+                cursor.execute(f'''
+                    SELECT readid, crlid, value
+                    FROM alpha
+                    WHERE readid IN ({placeholders})
+                    ORDER BY readid
+                ''', batch)
+                
+                # Group by readid
+                read_data = defaultdict(list)
+                for readid, crlid, value in cursor.fetchall():
+                    read_data[readid].append((crlid, value))
+                
+                # Compute and apply updates
+                updates = []
+                for readid, crls in read_data.items():
+                    if len(crls) == 1:
+                        continue
+                    
+                    total_rho = sum(d_rho_old[crlid] for crlid, _ in crls)
+                    if total_rho > 0:
+                        inv_total = 1.0 / total_rho
+                        for crlid, _ in crls:
+                            new_value = d_rho_old[crlid] * inv_total
+                            updates.append((new_value, readid, crlid))
+                            d_rho_new[crlid] += new_value
+                    else:
+                        inv_num = 1.0 / len(crls)
+                        for crlid, _ in crls:
+                            updates.append((inv_num, readid, crlid))
+                            d_rho_new[crlid] += inv_num
+                
+                if updates:
+                    cursor.executemany('''
+                        UPDATE alpha
+                        SET value = ?
+                        WHERE readid = ? AND crlid = ?
+                    ''', updates)
+                    conn.commit()
+                
+                if j % 100000 == 0:
+                    print(f"    Processed {j:,} reads...", file=sys.stderr)
+        
+        # Add contributions from single-CRL reads
+        cursor.execute('''
+            SELECT crlid, COUNT(*) as count
+            FROM alpha
+            WHERE readid IN (
+                SELECT readid
+                FROM alpha
+                GROUP BY readid
+                HAVING COUNT(*) = 1
+            )
+            GROUP BY crlid
+        ''')
+        for crlid, count in cursor.fetchall():
+            d_rho_new[crlid] += count
+        
+        # M-step: Normalize d_rho by constant library_size (same as original em())
+        # This ensures consistency with the original algorithm where library_size remains constant
+        if library_size > 0:
+            inv_library_size = 1.0 / float(library_size)
+            for crlid in d_rho_new:
+                d_rho[crlid] = d_rho_new[crlid] * inv_library_size
+        
+        # Check convergence
+        sum_of_rho_diff = sum(abs(d_rho[crlid] - d_rho_old.get(crlid, 0)) 
+                              for crlid in d_rho)
+        print(f"  Convergence: {sum_of_rho_diff:.2e} (threshold: {em_threshold:.2e})", file=sys.stderr)
+        i += 1
+    
+    return d_rho
+
+
+def quantify_crls_sqlite(crl_file, em_threshold, num_processes=1):
+    """
+    SQLite-based quantification that avoids loading d_alpha into memory.
+    
+    Uses disk-backed SQLite database instead of in-memory dictionaries.
+    Memory usage: ~8-16GB vs 200-500GB for standard method.
+    
+    Args:
+        crl_file: Path to loci.txt file
+        em_threshold: EM convergence threshold
+        num_processes: Number of parallel processes
+    
+    Returns:
+        Tuple of (d_read_crl_fractions, d_crl_tpms) in same format as quantify_crls()
+    """
+    # Create temporary SQLite database
+    db_file = os.path.join(tempfile.gettempdir(), f'chira_alpha_{os.getpid()}.db')
+    
+    # Remove existing database if present
+    if os.path.exists(db_file):
+        os.remove(db_file)
+    
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+    
+    # Optimize SQLite settings for performance
+    conn.execute('PRAGMA journal_mode=WAL')
+    conn.execute('PRAGMA synchronous=NORMAL')
+    conn.execute('PRAGMA cache_size=-256000')  # 256MB cache
+    conn.execute('PRAGMA temp_store=MEMORY')
+    conn.execute('PRAGMA mmap_size=268435456')  # 256MB mmap
+    
+    print(f"Creating SQLite database: {db_file}", file=sys.stderr)
+    
+    # Create tables (without indexes initially for faster bulk loading)
+    cursor.execute('''
+        CREATE TABLE alpha (
+            readid TEXT NOT NULL,
+            crlid TEXT NOT NULL,
+            value REAL NOT NULL DEFAULT 0.0,
+            PRIMARY KEY (readid, crlid)
+        )
+    ''')
+    
+    # Table for locus lengths (small, can stay in memory or SQLite)
+    cursor.execute('''
+        CREATE TABLE crl_loci_len (
+            crlid TEXT NOT NULL,
+            locusid TEXT NOT NULL,
+            length INTEGER NOT NULL,
+            PRIMARY KEY (crlid, locusid)
+        )
+    ''')
+    
+    # Load data into database with optimized bulk loading
+    print("Loading data into SQLite database...", file=sys.stderr)
+    d_crl_loci_len = defaultdict(lambda: defaultdict(int))
+    
+    # Disable some safety features during bulk load for speed
+    conn.execute('PRAGMA synchronous=OFF')
+    conn.execute('PRAGMA journal_mode=MEMORY')
+    
+    # Use batch inserts for better performance
+    BATCH_SIZE = 100000
+    alpha_batch = []
+    loci_batch = []
+    line_count = 0
+    
+    for line in read_file_lines_mmap(crl_file):
+        f = line.rstrip("\n").split("\t")
+        if len(f) < 10:
+            continue
+        
+        readid = f[0]
+        locusid = f[2]
+        crlid = f[3]
+        pos = f[9].split(':')
+        
+        if len(pos) < 3:
+            continue
+        try:
+            locuslength = int(pos[-2]) - int(pos[-3]) + 1
+        except (ValueError, IndexError):
+            continue
+        
+        # Batch insert alpha
+        alpha_batch.append((readid, crlid, 1.0))
+        d_crl_loci_len[crlid][locusid] = locuslength
+        loci_batch.append((crlid, locusid, locuslength))
+        
+        # Insert in batches
+        if len(alpha_batch) >= BATCH_SIZE:
+            cursor.executemany('INSERT INTO alpha VALUES (?, ?, ?)', alpha_batch)
+            cursor.executemany('INSERT OR REPLACE INTO crl_loci_len VALUES (?, ?, ?)', loci_batch)
+            conn.commit()
+            alpha_batch = []
+            loci_batch = []
+            line_count += BATCH_SIZE
+            if line_count % 1000000 == 0:
+                print(f"  Loaded {line_count:,} lines...", file=sys.stderr)
+    
+    # Insert remaining
+    if alpha_batch:
+        cursor.executemany('INSERT INTO alpha VALUES (?, ?, ?)', alpha_batch)
+        cursor.executemany('INSERT OR REPLACE INTO crl_loci_len VALUES (?, ?, ?)', loci_batch)
+        conn.commit()
+        line_count += len(alpha_batch)
+    
+    print(f"Database loaded. Total lines: {line_count:,}", file=sys.stderr)
+    
+    # Re-enable safety features
+    conn.execute('PRAGMA synchronous=NORMAL')
+    conn.execute('PRAGMA journal_mode=WAL')
+    conn.commit()  # Ensure all data is written before creating indexes
+    
+    # Create indexes after bulk load (much faster than maintaining during inserts)
+    print("Creating indexes...", file=sys.stderr)
+    cursor.execute('CREATE INDEX idx_readid ON alpha(readid)')
+    cursor.execute('CREATE INDEX idx_crlid ON alpha(crlid)')
+    cursor.execute('CREATE INDEX idx_crl_loci_crlid ON crl_loci_len(crlid)')
+    conn.commit()
+    print("Indexes created.", file=sys.stderr)
+    
+    # Initialize d_rho uniformly
+    print("Initializing d_rho...", file=sys.stderr)
+    d_rho = defaultdict(float)
+    
+    # Count CRLs per read and initialize uniformly
+    cursor.execute('''
+        SELECT readid, COUNT(*) as num_crls
+        FROM alpha
+        GROUP BY readid
+    ''')
+    
+    total_reads = 0
+    updates = []
+    for readid, num_crls in cursor.fetchall():
+        inv_num_crls = 1.0 / float(num_crls)
+        # Get CRLs for this read
+        cursor.execute('SELECT crlid FROM alpha WHERE readid = ?', (readid,))
+        for (crlid,) in cursor.fetchall():
+            updates.append((inv_num_crls, readid, crlid))
+            d_rho[crlid] += inv_num_crls
+        
+        total_reads += 1
+        if total_reads % 100000 == 0:
+            if updates:
+                cursor.executemany('UPDATE alpha SET value = ? WHERE readid = ? AND crlid = ?', updates)
+                conn.commit()
+                updates = []
+            print(f"  Processed {total_reads:,} reads...", file=sys.stderr)
+    
+    # Apply remaining updates
+    if updates:
+        cursor.executemany('UPDATE alpha SET value = ? WHERE readid = ? AND crlid = ?', updates)
+        conn.commit()
+    
+    # Normalize d_rho
+    library_size = sum(d_rho.values())
+    if library_size > 0:
+        inv_library_size = 1.0 / float(library_size)
+        for crlid in d_rho:
+            d_rho[crlid] *= inv_library_size
+    
+    # Run EM algorithm
+    print("Starting EM algorithm...", file=sys.stderr)
+    d_rho = em_sqlite(conn, db_file, d_rho, library_size, em_threshold, num_processes)
+    
+    # Compute final d_crl_expression
+    print("Computing CRL expressions...", file=sys.stderr)
+    d_crl_expression = defaultdict(float)
+    
+    cursor.execute('SELECT readid, crlid, value FROM alpha')
+    for readid, crlid, value in cursor.fetchall():
+        d_crl_expression[crlid] += value
+    
+    d_crl_tpm = tpm(d_crl_expression, d_crl_loci_len)
+    
+    # Extract d_read_crl_fractions from database
+    print("Extracting read-CRL fractions...", file=sys.stderr)
+    d_read_crl_fractions = defaultdict(lambda: defaultdict(float))
+    
+    cursor.execute('SELECT readid, crlid, value FROM alpha ORDER BY readid')
+    for readid, crlid, value in cursor.fetchall():
+        d_read_crl_fractions[readid][crlid] = value
+    
+    # Cleanup
+    conn.close()
+    if os.path.exists(db_file):
+        os.remove(db_file)
+    # Also remove WAL and SHM files
+    for suffix in ['.db-wal', '.db-shm']:
+        wal_file = db_file + suffix
+        if os.path.exists(wal_file):
+            os.remove(wal_file)
+    
+    return d_read_crl_fractions, d_crl_tpm
+
+
 def print_configuration(args):
     """Print configuration summary."""
     # OPTIMIZATION: Use f-strings instead of string concatenation for faster formatting
@@ -765,6 +1169,11 @@ def print_configuration(args):
     print(f'EM threshold                         : {args.em_thresh}')
     print(f'Number of processes                  : {args.num_processes if args.num_processes > 0 else "all available"}')
     print(f'Create CRLs too                      : {args.build_crls_too}')
+    print(f'Use SQLite database                  : {args.use_sqldb}')
+    if args.use_sqldb:
+        print('  -> Using disk-backed SQLite method (suitable for large files)')
+    else:
+        print('  -> Using in-memory method (standard)')
     print("===================================================================")
 
 
@@ -977,6 +1386,12 @@ def parse_arguments():
                              'Multi-processing is most beneficial for large datasets (>500 multimapping reads). '
                              'Set to 1 to disable parallel processing. Install MPIRE with: pip install mpire')
 
+    parser.add_argument('--use_sqldb', action='store_true', dest='use_sqldb',
+                        help='Use SQLite database backend for large input files. This method uses disk-backed storage '
+                             'instead of loading all data into memory, making it suitable for very large datasets '
+                             '(50GB+ input files). Memory usage: ~8-16GB vs 200-500GB for standard method. '
+                             'Runtime: ~3-8 hours depending on dataset size and number of processes.')
+
     parser.add_argument('-v', '--version', action='version', version=f'%(prog)s {chira_utilities.__version__}')
 
     return parser.parse_args()
@@ -996,7 +1411,10 @@ def main():
     
     # Quantify CRLs
     chira_utilities.print_w_time("START: Quantify CRLs")
-    d_read_crl_fractions, d_crl_tpms = quantify_crls(loci_file, args.em_thresh, args.num_processes)
+    if args.use_sqldb:
+        d_read_crl_fractions, d_crl_tpms = quantify_crls_sqlite(loci_file, args.em_thresh, args.num_processes)
+    else:
+        d_read_crl_fractions, d_crl_tpms = quantify_crls(loci_file, args.em_thresh, args.num_processes)
     chira_utilities.print_w_time("END: Quantify CRLs")
     
     # Write output

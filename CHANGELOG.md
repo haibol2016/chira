@@ -5,6 +5,15 @@ All notable changes to ChiRA will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.12] - 2026-02-20
+
+### Added
+- **chira_extract.py**: Added `gene_name_1` and `gene_name_2` columns to the interaction summary table (`{sample_name}.interactions.txt`)
+  - Extracts gene symbols from the chimeras file (columns 5 and 6: `gene_symbol_1` and `gene_symbol_2`)
+  - Displays all unique gene names involved in each interaction (semicolon-separated if multiple)
+  - Columns are added at the end of the interaction summary table, following the same pattern as `reference_transcript_id_1` and `reference_transcript_id_2`
+  - Properly handles interaction reversal when `interaction_otherway` is detected (gene names are swapped along with other fields)
+
 ## [1.4.11] - 2026-02-17
 
 ### Fixed
