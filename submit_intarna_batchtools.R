@@ -3,7 +3,7 @@
 # Usage: Rscript submit_intarna_batchtools.R <config_json> <jobs_json>
 #
 # Follows the same pattern as submit_chunks_batchtools.R (chira_map.py).
-# Each job runs IntaRNA once on a pairwise FASTA (query.fa + target.fa) for one chunk.
+# Each job runs IntaRNA once per chunk: multi-FASTA query.fa + target.fa -> result.csv (default). With --intarna_per_pair_only, runs once per pair instead.
 
 suppressPackageStartupMessages({
   library(batchtools)
@@ -49,6 +49,7 @@ walltime <- config$walltime
 conda_env <- config$conda_env
 intarna_params <- config$intarna_params
 job_name_prefix <- config$job_name_prefix
+try_multi_fasta_first <- if (!is.null(config$intarna_try_multi_fasta_first)) config$intarna_try_multi_fasta_first else TRUE
 max_parallel <- ifelse(is.null(config$max_parallel), nrow(jobs), config$max_parallel)
 template_file <- if (is.null(config$template_file) || config$template_file == "") {
   if (file.exists("lsf_custom.tmpl")) {
@@ -85,20 +86,93 @@ if (template_file == "lsf-simple" || file.exists(template_file)) {
   stop(sprintf("Template file '%s' does not exist. Use --batchtools_template to specify a valid template.", template_file))
 }
 
-run_intarna_job <- function(n, query_fa, target_fa, output_csv, params, conda_env = NULL) {
-  args <- c(strsplit(params, " ")[[1]], "-q", query_fa, "-t", target_fa, "--outPairwise", "--out", output_csv)
-  args <- args[args != ""]
-  if (!is.null(conda_env) && conda_env != "") {
-    conda_init <- 'eval "$(conda shell.bash hook)" 2>/dev/null || source "$(conda info --base)/etc/profile.d/conda.sh" 2>/dev/null || true'
-    conda_activate <- paste("conda activate", shQuote(conda_env))
-    intarna_cmd <- paste("IntaRNA", paste(sapply(args, shQuote), collapse = " "))
-    cmd <- paste(conda_init, "&&", conda_activate, "&&", intarna_cmd)
-    ret <- system(cmd, intern = TRUE)
-  } else {
-    ret <- system2("IntaRNA", args = args, stdout = TRUE, stderr = TRUE)
+# Parse multi-FASTA into list of {id, seq} in order (same order as pairs.tsv)
+parse_fasta_blocks <- function(path) {
+  if (!file.exists(path)) return(list())
+  lines <- readLines(path, warn = FALSE)
+  starts <- which(grepl("^>", lines))
+  blocks <- list()
+  for (i in seq_along(starts)) {
+    start <- starts[i]
+    end <- if (i < length(starts)) starts[i + 1L] - 1L else length(lines)
+    id <- sub("^>\\s*", "", lines[start])
+    seq <- paste(lines[(start + 1L):end], collapse = "")
+    blocks[[i]] <- list(id = id, seq = seq)
   }
-  if (!is.null(attr(ret, "status")) && attr(ret, "status") != 0) {
-    stop(paste(ret, collapse = "\n"))
+  blocks
+}
+
+# Run IntaRNA. Default: one multi-FASTA run per chunk (query.fa + target.fa -> result.csv).
+# If try_multi_fasta_first is FALSE (--intarna_per_pair_only), run once per pair and merge CSV.
+run_intarna_job <- function(n, query_fa, target_fa, output_csv, params, conda_env = NULL, try_multi_fasta_first = TRUE) {
+  chunk_dir <- dirname(query_fa)
+  pairs_tsv <- file.path(chunk_dir, "pairs.tsv")
+  if (!file.exists(pairs_tsv)) {
+    stop(sprintf("pairs.tsv not found: %s", pairs_tsv))
+  }
+  pairs <- read.table(pairs_tsv, sep = "\t", header = FALSE, stringsAsFactors = FALSE)
+  if (nrow(pairs) == 0L) {
+    file.create(output_csv)
+    return(invisible(NULL))
+  }
+
+  base_args <- strsplit(params, " ")[[1]]
+  base_args <- base_args[base_args != ""]
+  run_one_intarna <- function(q_fa, t_fa, out_file) {
+    args <- c(base_args, "-q", q_fa, "-t", t_fa, "--out", out_file)
+    if (!is.null(conda_env) && conda_env != "") {
+      conda_init <- 'eval "$(conda shell.bash hook)" 2>/dev/null || source "$(conda info --base)/etc/profile.d/conda.sh" 2>/dev/null || true'
+      conda_activate <- paste("conda activate", shQuote(conda_env))
+      intarna_cmd <- paste("IntaRNA", paste(sapply(args, shQuote), collapse = " "))
+      cmd <- paste(conda_init, "&&", conda_activate, "&&", intarna_cmd)
+      ret <- system(cmd, intern = TRUE)
+    } else {
+      ret <- system2("IntaRNA", args = args, stdout = TRUE, stderr = TRUE)
+    }
+    ret
+  }
+
+  # Default: one multi-FASTA run per chunk (same as before; result.csv filled by IntaRNA)
+  if (try_multi_fasta_first) {
+    ret <- run_one_intarna(query_fa, target_fa, output_csv)
+    if (!is.null(attr(ret, "status")) && attr(ret, "status") != 0) {
+      stop(sprintf("IntaRNA failed for chunk %s: %s", n, paste(ret, collapse = "\n")))
+    }
+    return(invisible(NULL))
+  }
+
+  # Optional: one IntaRNA run per pair (use --intarna_per_pair_only if multi-FASTA fails in your setup)
+  query_blocks <- parse_fasta_blocks(query_fa)
+  target_blocks <- parse_fasta_blocks(target_fa)
+  if (length(query_blocks) != nrow(pairs) || length(target_blocks) != nrow(pairs)) {
+    stop(sprintf("Chunk %s: pair count mismatch (pairs=%d, query blocks=%d, target blocks=%d)",
+                 n, nrow(pairs), length(query_blocks), length(target_blocks)))
+  }
+  out_con <- file(output_csv, "w")
+  on.exit(close(out_con), add = TRUE)
+  header_written <- FALSE
+  for (i in seq_len(nrow(pairs))) {
+    q_tmp <- tempfile(pattern = "q_", fileext = ".fa")
+    t_tmp <- tempfile(pattern = "t_", fileext = ".fa")
+    tmp_out <- tempfile(pattern = "out_", fileext = ".csv")
+    writeLines(c(paste0(">", query_blocks[[i]]$id), query_blocks[[i]]$seq), q_tmp)
+    writeLines(c(paste0(">", target_blocks[[i]]$id), target_blocks[[i]]$seq), t_tmp)
+    ret <- run_one_intarna(q_tmp, t_tmp, tmp_out)
+    unlink(c(q_tmp, t_tmp))
+    if (!is.null(attr(ret, "status")) && attr(ret, "status") != 0) {
+      unlink(tmp_out)
+      stop(sprintf("IntaRNA failed for pair %d in chunk %s: %s", i, n, paste(ret, collapse = "\n")))
+    }
+    if (file.exists(tmp_out)) {
+      lines_out <- readLines(tmp_out, warn = FALSE)
+      if (!header_written) {
+        writeLines(lines_out, out_con)
+        header_written <- TRUE
+      } else {
+        if (length(lines_out) > 1L) writeLines(lines_out[-1L], out_con)
+      }
+      unlink(tmp_out)
+    }
   }
   invisible(NULL)
 }
@@ -126,7 +200,7 @@ ids <- batchMap(
   query_fa = jobs$query_fa,
   target_fa = jobs$target_fa,
   output_csv = jobs$output_csv,
-  more.args = list(params = intarna_params, conda_env = conda_env),
+  more.args = list(params = intarna_params, conda_env = conda_env, try_multi_fasta_first = try_multi_fasta_first),
   reg = reg
 )
 

@@ -910,26 +910,36 @@ def prepare_hybridization_batch(outdir, intarna_params, n, sample_name, batchtoo
 
 def _parse_intarna_csv_to_hybrids(csv_path, pairs_order=None):
     """
-    Parse IntaRNA CSV (; sep). Only lines with exactly 8 columns as expected are used:
-    id1,id2,start1,end1,start2,end2,hybridDPfull,E. We run IntaRNA with query=lp1, target=lp2,
-    so id1=lp1, id2=lp2; we store key (id2,id1)=(lp2,lp1) so lookup in finish uses (locuspos2, locuspos1).
-    Any other line (header, no-hit, malformed) is excluded. Return dict (lp2,lp1) -> (dotbracket, pos, energy, end1, end2).
+    Parse IntaRNA CSV. We run IntaRNA with query=lp1, target=lp2 so id1=lp1, id2=lp2.
+    Store under (id1, id2). Lookup in finish_hybridization_write tries (lp1, lp2) then (lp2, lp1).
+    Accepts ; or , separator. Optional: store (lp1, lp2) from pairs_order when it differs from (id1, id2).
     """
     d_hybrids = {}
     if not os.path.exists(csv_path):
+        sys.stderr.write(f"Warning: IntaRNA result file not found: {csv_path}\n")
         return d_hybrids
-    with open(csv_path, 'r') as f:
+    with open(csv_path, 'r', encoding='utf-8', errors='replace') as f:
         lines = f.readlines()
     if len(lines) < 2:
+        sys.stderr.write(f"Warning: IntaRNA result file empty or header-only: {csv_path}\n")
         return d_hybrids
 
-    for line in lines[1:]:
-        parts = line.strip().split(";")
-        if len(parts) != 8:
+    data_lines = [ln for ln in lines[1:] if ln.strip()]
+    for idx, line in enumerate(data_lines):
+        line = line.strip()
+        if not line:
             continue
-        id1, id2 = parts[0], parts[1]
+        for sep in (";", ","):
+            parts = line.split(sep)
+            if len(parts) >= 8:
+                break
+        else:
+            continue
+        id1 = parts[0].strip()
+        id2 = parts[1].strip()
         start1, end1, start2, end2 = parts[2], parts[3], parts[4], parts[5]
-        hybrid_dp, energy = parts[6], parts[7]
+        hybrid_dp = parts[6].strip()
+        energy = parts[7].strip()
         if "&" in hybrid_dp:
             target_db, query_db = hybrid_dp.split("&", 1)
             target_db_swap = target_db.replace("(", ")")
@@ -938,9 +948,15 @@ def _parse_intarna_csv_to_hybrids(csv_path, pairs_order=None):
         else:
             dotbracket = hybrid_dp
         pos = start1 + "&" + start2
-        key = (id2, id1)
-        d_hybrids[key] = (dotbracket, pos, energy, end1, end2)
+        val = (dotbracket, pos, energy, end1, end2)
+        d_hybrids[(id1, id2)] = val
+        if pairs_order and idx < len(pairs_order):
+            lp1, lp2 = pairs_order[idx][0].strip(), pairs_order[idx][1].strip()
+            if (lp1, lp2) != (id1, id2):
+                d_hybrids[(lp1, lp2)] = val
 
+    if not d_hybrids and data_lines:
+        sys.stderr.write(f"Warning: No valid IntaRNA data rows in {csv_path}. First data line: {data_lines[0][:80]!r}\n")
     return d_hybrids
 
 
@@ -977,15 +993,17 @@ def finish_hybridization_write(outdir, n, sample_name, batchtools_work_dir, comp
             a = line_str.split("\t")
             seq1 = seq2 = dotbracket = pos = energy = "NA"
             end1 = end2 = None
-            if locuspos1 in d_loci_seqs and locuspos2 in d_loci_seqs:
-                seq1 = d_loci_seqs[locuspos1]
-                seq2 = d_loci_seqs[locuspos2]
-                # IntaRNA CSV outputs id1=query, id2=target; we write query=lp1, target=lp2,
-                # so result is stored as key (id2,id1)=(lp2,lp1). Try both orders to find it.
-                if (locuspos1, locuspos2) in d_hybrids:
-                    dotbracket, pos, energy, end1, end2 = d_hybrids[(locuspos1, locuspos2)]
-                elif (locuspos2, locuspos1) in d_hybrids:
-                    dotbracket, pos, energy, end1, end2 = d_hybrids[(locuspos2, locuspos1)]
+            # Normalize locus IDs (strip) to match CSV ids
+            lp1 = locuspos1.strip() if locuspos1 else locuspos1
+            lp2 = locuspos2.strip() if locuspos2 else locuspos2
+            if lp1 in d_loci_seqs and lp2 in d_loci_seqs:
+                seq1 = d_loci_seqs[lp1]
+                seq2 = d_loci_seqs[lp2]
+                # Look up IntaRNA result (stored as (id1,id2); try both orders)
+                if (lp1, lp2) in d_hybrids:
+                    dotbracket, pos, energy, end1, end2 = d_hybrids[(lp1, lp2)]
+                elif (lp2, lp1) in d_hybrids:
+                    dotbracket, pos, energy, end1, end2 = d_hybrids[(lp2, lp1)]
             if len(a) <= CHIMERA_IDX_HYBRID_ENDS:
                 a.extend(["NA"] * (CHIMERA_IDX_HYBRID_ENDS - len(a) + 1))
             a[CHIMERA_IDX_SEQUENCES] = seq1 + "&" + seq2
@@ -1065,6 +1083,8 @@ def run_batchtools_r_script(args, batchtools_work_dir, batchtools_registry, inta
     if template_file != "lsf-simple":
         template_file = os.path.abspath(template_file)
 
+    # Default: one multi-FASTA run per chunk. With --intarna_per_pair_only, R runs once per pair.
+    try_multi_fasta_first = not getattr(args, 'intarna_per_pair_only', False)
     config = {
         "reg_dir": reg_dir,
         "queue": queue,
@@ -1076,6 +1096,7 @@ def run_batchtools_r_script(args, batchtools_work_dir, batchtools_registry, inta
         "job_name_prefix": job_name_prefix,
         "max_parallel": max_parallel,
         "template_file": template_file,
+        "intarna_try_multi_fasta_first": try_multi_fasta_first,
     }
 
     config_file = os.path.abspath(os.path.join(batchtools_work_dir, "config.json"))
@@ -1976,6 +1997,9 @@ def parse_arguments():
     parser.add_argument('--keep_batchtools_work', action='store_true', dest='keep_batchtools_work',
                         help='Keep batchtools work dir (config.json, jobs.json, chunk dirs, registry) for debugging. '
                              'Default: remove after successful completion.')
+    parser.add_argument('--intarna_per_pair_only', action='store_true', dest='intarna_per_pair_only',
+                        help='Run IntaRNA once per locus pair instead of one multi-FASTA run per chunk. '
+                             'Use only if multi-FASTA gives empty result.csv in your setup. Default: one IntaRNA run per chunk (multi-FASTA).')
 
     parser.add_argument('-f1', '--ref_fasta1', action='store', dest='ref_fasta1', required=True,
                         metavar='', help='First priority fasta file')
