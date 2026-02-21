@@ -1759,10 +1759,10 @@ def build_intarna_params(args):
              noseed_param, "-m", args.intarna_mode, "--acc", args.accessibility,
              "--temperature", str(args.temperature), "--seedBP", str(args.seed_bp),
              "--seedMinPu", str(args.seed_min_pu), "--accW", str(args.acc_width)]
-    # IntaRNA multithreading: parallelize predictions (or window combos when single pair)
-    if getattr(args, 'intarna_threads', 1) != 1:
-        parts.append("--threads")
-        parts.append(str(args.intarna_threads))
+    # IntaRNA multithreading: use batchtools_cores (same as LSF job allocation)
+    cores = getattr(args, 'batchtools_cores', None) or 8
+    parts.append("--threads")
+    parts.append(str(cores))
     return " ".join(parts)
 
 
@@ -1938,11 +1938,6 @@ def parse_arguments():
                         dest='acc_width', choices=range(0, 99999),
                         help='IntaRNA --accW parameter:  sliding window size for accessibility computation')
 
-    parser.add_argument('--intarna_threads', action='store', type=int, default=1, metavar='',
-                        dest='intarna_threads',
-                        help='IntaRNA --threads: threads per process (0=all available). '
-                             'Total CPU use is processes * intarna_threads. Default: 1')
-
     parser.add_argument('--use_batchtools', action='store_true', dest='use_batchtools',
                         help='Use R batchtools to submit IntaRNA jobs to HPC cluster (batch FASTA per chunk). '
                              'Same pattern as chira_map.py. Requires R with batchtools and IntaRNA on cluster PATH.')
@@ -1959,7 +1954,7 @@ def parse_arguments():
 
     parser.add_argument('--batchtools_cores', action='store', type=int, default=None, metavar='',
                         dest='batchtools_cores',
-                        help='Cores per batchtools job (default: 8)')
+                        help='Cores per batchtools job and IntaRNA --threads (default: 8)')
 
     parser.add_argument('--batchtools_memory', action='store', dest='batchtools_memory', default=None, metavar='',
                         help='Total memory per job (e.g. 8GB, 64GB). Converted to per-core for LSF.')
