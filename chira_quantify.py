@@ -861,8 +861,9 @@ def em_sqlite(conn, db_path, d_rho, library_size, em_threshold, num_processes=1)
                 return updates, dict(d_rho_local)
             
             # Compute updates in parallel (all read-only, no conflicts)
+            # Wrap each chunk in a tuple so MPIRE passes it as one argument (map unpacks iterables)
             with WorkerPool(n_jobs=num_processes) as pool:
-                results = pool.map(compute_updates_parallel, read_chunks, progress_bar=False)
+                results = pool.map(compute_updates_parallel, [(c,) for c in read_chunks], progress_bar=False)
             
             # Collect all updates
             all_updates = []
