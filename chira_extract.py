@@ -61,6 +61,7 @@ CHIMERA_IDX_HYBRID = 30
 CHIMERA_IDX_HYBRID_POS = 31
 CHIMERA_IDX_MFE = 32
 CHIMERA_IDX_MIRNA_POSITION = 33
+CHIMERA_IDX_HYBRID_ENDS = 34
 
 # miRNA region types
 MIRNA_REGION_TYPES = ["miRNA", "3p_mature_mir", "5p_mature_mir", "mature_mir"]
@@ -581,7 +582,8 @@ def extract_and_write(readid, l_read_alignments, l_loci_bed, d_ref_lengths1, d_r
                    "NA",  # hybrid
                    "NA",  # hybrid_pos
                    "NA",  # mfe
-                   mirna_position]
+                   mirna_position,
+                   "NA"]  # hybrid_ends (end1&end2 from IntaRNA)
         chimera_found = True
         l_best_chimeras.append(chimera)
 
@@ -906,11 +908,11 @@ def prepare_hybridization_batch(outdir, intarna_params, n, sample_name, batchtoo
     return len(unique_pairs)
 
 
-def _parse_intarna_csv_to_hybrids(csv_path, pairs_order):
+def _parse_intarna_csv_to_hybrids(csv_path, pairs_order=None):
     """
-    Parse IntaRNA CSV (; sep, cols id1,start1,start2,hybridDPfull,E).
-    id1=target=locuspos2, id2=query=locuspos1. Return dict (lp1,lp2) -> (dotbracket, pos, energy).
-    pairs_order: list of (locuspos1, locuspos2) in same order as FASTA.
+    Parse IntaRNA CSV (; sep). Only lines with exactly 8 columns as expected are used:
+    id1,id2,start1,end1,start2,end2,hybridDPfull,E. Match by (id2,id1)=(lp1,lp2).
+    Any other line (header, no-hit, malformed) is excluded. Return dict (lp1,lp2) -> (dotbracket, pos, energy, end1, end2).
     """
     d_hybrids = {}
     if not os.path.exists(csv_path):
@@ -919,19 +921,14 @@ def _parse_intarna_csv_to_hybrids(csv_path, pairs_order):
         lines = f.readlines()
     if len(lines) < 2:
         return d_hybrids
-    # Header: id1;start1;start2;hybridDPfull;E (or similar)
-    for i, line in enumerate(lines[1:], start=0):
+
+    for line in lines[1:]:
         parts = line.strip().split(";")
-        if len(parts) < 5:
+        if len(parts) != 8:
             continue
-        if i >= len(pairs_order):
-            break
-        lp1, lp2 = pairs_order[i]
-        # id1=target, id2=query -> (id2,id1) = (query,target) = (lp1,lp2) in our convention
-        start1, start2 = parts[1], parts[2]
-        hybrid_dp = parts[3]
-        energy = parts[4]
-        # Swap dot-bracket for query/target to match hybridize_with_intarna convention
+        id1, id2 = parts[0], parts[1]
+        start1, end1, start2, end2 = parts[2], parts[3], parts[4], parts[5]
+        hybrid_dp, energy = parts[6], parts[7]
         if "&" in hybrid_dp:
             target_db, query_db = hybrid_dp.split("&", 1)
             target_db_swap = target_db.replace("(", ")")
@@ -940,7 +937,9 @@ def _parse_intarna_csv_to_hybrids(csv_path, pairs_order):
         else:
             dotbracket = hybrid_dp
         pos = start1 + "&" + start2
-        d_hybrids[(lp1, lp2)] = (dotbracket, pos, energy)
+        key = (id2, id1)
+        d_hybrids[key] = (dotbracket, pos, energy, end1, end2)
+
     return d_hybrids
 
 
@@ -976,15 +975,19 @@ def finish_hybridization_write(outdir, n, sample_name, batchtools_work_dir, comp
         for line_str, locuspos1, locuspos2 in lines_with_loci:
             a = line_str.split("\t")
             seq1 = seq2 = dotbracket = pos = energy = "NA"
+            end1 = end2 = None
             if locuspos1 in d_loci_seqs and locuspos2 in d_loci_seqs:
                 seq1 = d_loci_seqs[locuspos1]
                 seq2 = d_loci_seqs[locuspos2]
                 if (locuspos1, locuspos2) in d_hybrids:
-                    dotbracket, pos, energy = d_hybrids[(locuspos1, locuspos2)]
+                    dotbracket, pos, energy, end1, end2 = d_hybrids[(locuspos1, locuspos2)]
+            if len(a) <= CHIMERA_IDX_HYBRID_ENDS:
+                a.extend(["NA"] * (CHIMERA_IDX_HYBRID_ENDS - len(a) + 1))
             a[CHIMERA_IDX_SEQUENCES] = seq1 + "&" + seq2
             a[CHIMERA_IDX_HYBRID] = dotbracket
             a[CHIMERA_IDX_HYBRID_POS] = pos
             a[CHIMERA_IDX_MFE] = energy
+            a[CHIMERA_IDX_HYBRID_ENDS] = (f"{end1}&{end2}" if (end1 is not None and end2 is not None) else "NA")
             fh_out.write("\t".join(a) + "\n")
 
     file_chimeras = os.path.join(outdir, sample_name + ".chimeras." + str(n))
@@ -1412,19 +1415,6 @@ def merge_files(inprefix, outfile, header, r, compress=False):
             os.remove(temp_file)
 
 
-# This modified function is used to find the end position of the hybridization
-def hybridization_positions(dotbracket1, dotbracket2):
-    end1 = -1
-    end2 = -1
-    for i in range(len(dotbracket1)):
-        if dotbracket1[i] == '(':
-            end1 = i + 1
-    for j in range(len(dotbracket2)):
-        if dotbracket2[j] == ')':
-            end2 = j + 1
-    return end1, end2
-
-
 def write_interaction_summary(outdir, sample_name, compress=False, num_threads=4):
     d_interactions = defaultdict(lambda: defaultdict(list))
     chimeras_file = os.path.join(outdir, sample_name + ".chimeras.txt")
@@ -1476,18 +1466,21 @@ def write_interaction_summary(outdir, sample_name, compress=False, num_threads=4
                                                                                 f[26], f[27])
                 gene_name1, gene_name2 = gene_name2, gene_name1
             if dotbracket != "NA":
-                hybrid_end1, hybrid_end2 = hybridization_positions(list(dotbracket.split("&")[0]),
-                                                                    list(dotbracket.split("&")[1]))
-                # decrease by 1 before adding to the reference start
-                hybrid_start1 = int(hybrid_start_pos.split("&")[0]) - 1
-                hybrid_start2 = int(hybrid_start_pos.split("&")[1]) - 1
-                hybridization_pos1 = f'{refid1}:{int(ref_start1) + hybrid_start1}-{int(ref_start1) + hybrid_end1}:{ref_strand1}'
-                hybridization_pos2 = f'{refid2}:{int(ref_start2) + hybrid_start2}-{int(ref_start2) + hybrid_end2}:{ref_strand2}'
-                hybridized_sequence1 = sequence1[hybrid_start1:hybrid_end1]
-                hybridized_sequence2 = sequence2[hybrid_start2:hybrid_end2]
+                hybrid_ends = f[34] if len(f) > 34 else "NA"
+                if hybrid_ends != "NA" and "&" in hybrid_ends:
+                    # IntaRNA: id1=target (locus2), id2=query (locus1). start1,end1 = locus2; start2,end2 = locus1.
+                    end1, end2 = map(int, hybrid_ends.split("&", 1))  # locus2 end, locus1 end (1-based)
+                    start1, start2 = hybrid_start_pos.split("&", 1)
+                    start1, start2 = int(start1) - 1, int(start2) - 1  # 0-based for slicing
+                    # locus1 (refid1) = query: use start2, end2
+                    # locus2 (refid2) = target: use start1, end1
+                    hybridization_pos1 = f'{refid1}:{int(ref_start1) + start2}-{int(ref_start1) + end2}:{ref_strand1}'
+                    hybridization_pos2 = f'{refid2}:{int(ref_start2) + start1}-{int(ref_start2) + end1}:{ref_strand2}'
+                    hybridized_sequence1 = sequence1[start2:end2]
+                    hybridized_sequence2 = sequence2[start1:end1]
 
-                hybridization_pos = hybridization_pos1 + '&' + hybridization_pos2
-                hybridized_sequences = hybridized_sequence1 + '&' + hybridized_sequence2
+                    hybridization_pos = hybridization_pos1 + '&' + hybridization_pos2
+                    hybridized_sequences = hybridized_sequence1 + '&' + hybridized_sequence2
 
                 if interaction_otherway in d_interactions:
                     hybrid_start_pos = f[31].split('&')[1] + '&' + f[31].split('&')[0]
@@ -1755,7 +1748,7 @@ def build_intarna_params(args):
     noseed_param = ""
     if args.no_seed:
         noseed_param = "--noSeed"
-    parts = ["--outMode C", "--outCsvCols id1,start1,start2,hybridDPfull,E",
+    parts = ["--outMode C", "--outCsvCols id1,id2,start1,end1,start2,end2,hybridDPfull,E",
              noseed_param, "-m", args.intarna_mode, "--acc", args.accessibility,
              "--temperature", str(args.temperature), "--seedBP", str(args.seed_bp),
              "--seedMinPu", str(args.seed_min_pu), "--accW", str(args.acc_width)]
@@ -1856,7 +1849,8 @@ def merge_output_files(args, chimeras_prefix):
                                  "hybridization_structure",
                                  "hybridization_positions",
                                  "hybridization_mfe_kcal_mol",
-                                 "mirna_read_position"])
+                                 "mirna_read_position",
+                                 "hybridization_ends"])
     merge_files(chimeras_prefix, chimeras_file, header_chimeras, args.processes, args.compress)
     
     header_singletons = "\t".join(["read_id",

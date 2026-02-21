@@ -85,10 +85,18 @@ if (template_file == "lsf-simple" || file.exists(template_file)) {
   stop(sprintf("Template file '%s' does not exist. Use --batchtools_template to specify a valid template.", template_file))
 }
 
-run_intarna_job <- function(n, query_fa, target_fa, output_csv, params) {
+run_intarna_job <- function(n, query_fa, target_fa, output_csv, params, conda_env = NULL) {
   args <- c(strsplit(params, " ")[[1]], "-q", query_fa, "-t", target_fa, "--outPairwise", "--out", output_csv)
   args <- args[args != ""]
-  ret <- system2("IntaRNA", args = args, stdout = TRUE, stderr = TRUE)
+  if (!is.null(conda_env) && conda_env != "") {
+    conda_init <- 'eval "$(conda shell.bash hook)" 2>/dev/null || source "$(conda info --base)/etc/profile.d/conda.sh" 2>/dev/null || true'
+    conda_activate <- paste("conda activate", shQuote(conda_env))
+    intarna_cmd <- paste("IntaRNA", paste(sapply(args, shQuote), collapse = " "))
+    cmd <- paste(conda_init, "&&", conda_activate, "&&", intarna_cmd)
+    ret <- system(cmd, intern = TRUE)
+  } else {
+    ret <- system2("IntaRNA", args = args, stdout = TRUE, stderr = TRUE)
+  }
   if (!is.null(attr(ret, "status")) && attr(ret, "status") != 0) {
     stop(paste(ret, collapse = "\n"))
   }
@@ -118,7 +126,7 @@ ids <- batchMap(
   query_fa = jobs$query_fa,
   target_fa = jobs$target_fa,
   output_csv = jobs$output_csv,
-  more.args = list(params = intarna_params),
+  more.args = list(params = intarna_params, conda_env = conda_env),
   reg = reg
 )
 
