@@ -911,8 +911,9 @@ def prepare_hybridization_batch(outdir, intarna_params, n, sample_name, batchtoo
 def _parse_intarna_csv_to_hybrids(csv_path, pairs_order=None):
     """
     Parse IntaRNA CSV (; sep). Only lines with exactly 8 columns as expected are used:
-    id1,id2,start1,end1,start2,end2,hybridDPfull,E. Match by (id2,id1)=(lp1,lp2).
-    Any other line (header, no-hit, malformed) is excluded. Return dict (lp1,lp2) -> (dotbracket, pos, energy, end1, end2).
+    id1,id2,start1,end1,start2,end2,hybridDPfull,E. We run IntaRNA with query=lp1, target=lp2,
+    so id1=lp1, id2=lp2; we store key (id2,id1)=(lp2,lp1) so lookup in finish uses (locuspos2, locuspos1).
+    Any other line (header, no-hit, malformed) is excluded. Return dict (lp2,lp1) -> (dotbracket, pos, energy, end1, end2).
     """
     d_hybrids = {}
     if not os.path.exists(csv_path):
@@ -979,8 +980,12 @@ def finish_hybridization_write(outdir, n, sample_name, batchtools_work_dir, comp
             if locuspos1 in d_loci_seqs and locuspos2 in d_loci_seqs:
                 seq1 = d_loci_seqs[locuspos1]
                 seq2 = d_loci_seqs[locuspos2]
+                # IntaRNA CSV outputs id1=query, id2=target; we write query=lp1, target=lp2,
+                # so result is stored as key (id2,id1)=(lp2,lp1). Try both orders to find it.
                 if (locuspos1, locuspos2) in d_hybrids:
                     dotbracket, pos, energy, end1, end2 = d_hybrids[(locuspos1, locuspos2)]
+                elif (locuspos2, locuspos1) in d_hybrids:
+                    dotbracket, pos, energy, end1, end2 = d_hybrids[(locuspos2, locuspos1)]
             if len(a) <= CHIMERA_IDX_HYBRID_ENDS:
                 a.extend(["NA"] * (CHIMERA_IDX_HYBRID_ENDS - len(a) + 1))
             a[CHIMERA_IDX_SEQUENCES] = seq1 + "&" + seq2
@@ -1467,6 +1472,11 @@ def write_interaction_summary(outdir, sample_name, compress=False, num_threads=4
                 gene_name1, gene_name2 = gene_name2, gene_name1
             if dotbracket != "NA":
                 hybrid_ends = f[34] if len(f) > 34 else "NA"
+                # Ensure hybridization_pos1/2 and hybridized_sequence1/2 are always set when
+                # dotbracket != "NA", so the "if interaction_otherway" block below never
+                # references undefined names (e.g. when hybrid_ends is NA or column missing).
+                hybridization_pos1 = hybridization_pos2 = ""
+                hybridized_sequence1 = hybridized_sequence2 = "NA"
                 if hybrid_ends != "NA" and "&" in hybrid_ends:
                     # IntaRNA: id1=target (locus2), id2=query (locus1). start1,end1 = locus2; start2,end2 = locus1.
                     end1, end2 = map(int, hybrid_ends.split("&", 1))  # locus2 end, locus1 end (1-based)
