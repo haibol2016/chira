@@ -738,9 +738,9 @@ def submit_chunks_with_batchtools(args, chunk_files, chunk_dir, alignment_job_ty
             "template_file": template_file
         }
         
-        # Write config and chunks to JSON files
-        config_file = os.path.join(reg_dir, "config.json")
-        chunks_file = os.path.join(reg_dir, "chunks.json")
+        # Write config and chunks to JSON files (absolute paths for R script cwd=script_dir)
+        config_file = os.path.abspath(os.path.join(reg_dir, "config.json"))
+        chunks_file = os.path.abspath(os.path.join(reg_dir, "chunks.json"))
         
         # CRITICAL: Ensure all paths are absolute and properly formatted
         # Batchtools jobs run on different cluster nodes, so relative paths won't work.

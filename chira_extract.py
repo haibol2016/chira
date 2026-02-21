@@ -9,7 +9,11 @@ import datetime
 from BCBio import GFF
 from Bio import SeqIO
 import subprocess
+import shutil
 import math
+import json
+import re
+import time
 import gzip
 import warnings
 import pickle
@@ -44,7 +48,7 @@ from mpire import WorkerPool
 
 
 d_gene_annotations = defaultdict(lambda: defaultdict(str))
-d_transcript_annotations = defaultdict(lambda: defaultdict())
+d_transcript_annotations = defaultdict(lambda: defaultdict(list))
 # OPTIMIZATION: Store interval trees for UTR/CDS features per transcript
 # This enables O(log n) lookup instead of O(n) linear search in guess_region()
 d_transcript_interval_trees = defaultdict(dict)  # {transcript_id: {'UTR': IntervalTree, 'CDS': IntervalTree}}
@@ -680,7 +684,7 @@ def write_chimeras(chunk_start, chunk_end, total_read_count, d_ref_lengths1, d_r
     if shared_objects:
         d_ref_lengths1 = shared_objects['d_ref_lengths1']
         d_ref_lengths2 = shared_objects['d_ref_lengths2']
-    d_regions = defaultdict()
+    d_regions = {}
     l_loci_bed = set()
     file_chimeras = os.path.join(outdir, sample_name + ".chimeras." + n)
     file_singletons = os.path.join(outdir, sample_name + ".singletons." + n)
@@ -802,9 +806,10 @@ def write_chimeras(chunk_start, chunk_end, total_read_count, d_ref_lengths1, d_r
                             continue
                         if read_count > chunk_end:
                             break
-                        l_read_alignments = filter_alignments(l_readlines, tpm_threshold, score_cutoff)
-                        extract_and_write(prev_readid, l_read_alignments, l_loci_bed, d_ref_lengths1, d_ref_lengths2, f_gtf,
-                                          d_regions, chimeric_overlap, fh_chimeras, fh_singletons, hybridize)
+                        if prev_readid is not None:
+                            l_read_alignments = filter_alignments(l_readlines, tpm_threshold, score_cutoff)
+                            extract_and_write(prev_readid, l_read_alignments, l_loci_bed, d_ref_lengths1, d_ref_lengths2, f_gtf,
+                                              d_regions, chimeric_overlap, fh_chimeras, fh_singletons, hybridize)
 
                         read_count += 1
                         prev_readid = readid
@@ -828,86 +833,286 @@ def write_chimeras(chunk_start, chunk_end, total_read_count, d_ref_lengths1, d_r
                 fh_bed.write(bed_line + "\n")
 
 
-def hybridize_and_write(outdir, intarna_params, n, sample_name, compress=False):
-    d_loci_seqs = defaultdict()
-    # OPTIMIZATION: Use larger buffer size (2MB) for better I/O performance
-    BUFFER_SIZE = 2 * 1024 * 1024  # 2MB buffer
-    fasta_file = os.path.join(outdir, "loci.fa.") + n
-    
-    # OPTIMIZATION: Parse FASTA manually instead of using SeqIO.parse()
-    # This is 2-5x faster than Biopython's SeqIO for large FASTA files
-    # Similar to optimization in chira_collapse.py
-    # FASTA format: >header\nsequence\n>header\nsequence\n...
-    with open(fasta_file, 'r', buffering=BUFFER_SIZE) as fh:
+def _load_loci_seqs_from_fasta(outdir, n, buffer_size=2*1024*1024):
+    """Load d_loci_seqs from loci.fa.<n> (shared helper)."""
+    d_loci_seqs = {}
+    fasta_file = os.path.join(outdir, "loci.fa.") + str(n)
+    with open(fasta_file, 'r', buffering=buffer_size) as fh:
         current_id = None
         current_seq = []
         for line in fh:
             line_stripped = line.rstrip('\n\r')
             if line_stripped.startswith('>'):
-                # Save previous sequence if we have one
                 if current_id is not None:
-                    # ids of the form ENSMUST00000185852:1602:1618:+(+). Strip last 3 characters
-                    # Safely handle IDs that might be shorter than 3 characters
-                    if len(current_id) >= 3:
-                        locus_id = current_id[:-3]
-                    else:
-                        # If ID is shorter than 3 chars, use as-is (shouldn't happen normally)
-                        locus_id = current_id
-                    # Join sequence lines and convert T to U (RNA format)
+                    locus_id = current_id[:-3] if len(current_id) >= 3 else current_id
                     sequence = ''.join(current_seq).upper().replace('T', 'U')
                     d_loci_seqs[locus_id] = sequence
-                # Start new sequence: header is everything after '>'
                 current_id = line_stripped[1:].strip()
                 current_seq = []
             else:
-                # Accumulate sequence lines (may be split across multiple lines)
                 if current_id is not None:
                     current_seq.append(line_stripped)
-        
-        # Don't forget the last sequence
         if current_id is not None:
-            if len(current_id) >= 3:
-                locus_id = current_id[:-3]
-            else:
-                locus_id = current_id
+            locus_id = current_id[:-3] if len(current_id) >= 3 else current_id
             sequence = ''.join(current_seq).upper().replace('T', 'U')
             d_loci_seqs[locus_id] = sequence
+    return d_loci_seqs
 
-    d_hybrids = defaultdict()
-    file_chimeras = os.path.join(outdir, sample_name + ".chimeras." + n)
-    # Intermediate files are NOT compressed - only final merged files are compressed
-    output_file = os.path.join(outdir, sample_name + ".chimeras-r." + n)
-    # Intermediate files are NOT compressed - only final merged files are compressed
-    
-    # Open files (intermediate files are always uncompressed)
-    # OPTIMIZATION: Use larger buffer size (2MB) for better I/O performance with large files
-    BUFFER_SIZE = 2 * 1024 * 1024  # 2MB buffer
-    open_func = open
-    open_mode_read = "r"
-    open_mode_write = "w"
-    
-    with open_func(file_chimeras, open_mode_read, buffering=BUFFER_SIZE) as fh_chimeras, \
-         open_func(output_file, open_mode_write, buffering=BUFFER_SIZE) as fh_out:
-        for line in fh_chimeras:
-            seq1 = seq2 = dotbracket = pos = energy = "NA"
+
+def prepare_hybridization_batch(outdir, intarna_params, n, sample_name, batchtools_work_dir):
+    """
+    Phase 1 for batchtools: load chimera file, write pairwise FASTA and manifest for chunk n.
+    Saves lines_with_loci and d_loci_seqs for the finish phase. Does not run IntaRNA.
+    """
+    BUFFER_SIZE = 2 * 1024 * 1024
+    d_loci_seqs = _load_loci_seqs_from_fasta(outdir, n, BUFFER_SIZE)
+    file_chimeras = os.path.join(outdir, sample_name + ".chimeras." + str(n))
+    chunk_dir = os.path.join(batchtools_work_dir, str(n))
+    os.makedirs(chunk_dir, exist_ok=True)
+
+    lines_with_loci = []
+    unique_pairs = []
+    seen = set()
+    with open(file_chimeras, 'r', buffering=BUFFER_SIZE) as fh:
+        for line in fh:
             a = line.rstrip("\n").split("\t")
             locuspos1 = a[CHIMERA_IDX_LOCUS1]
             locuspos2 = a[CHIMERA_IDX_LOCUS2]
+            lines_with_loci.append((line.rstrip("\n"), locuspos1, locuspos2))
+            if locuspos1 in d_loci_seqs and locuspos2 in d_loci_seqs:
+                key = (locuspos1, locuspos2)
+                if key not in seen:
+                    seen.add(key)
+                    unique_pairs.append((locuspos1, locuspos2))
+
+    # Write pairwise FASTA (query = locus1, target = locus2; same order for --outPairwise)
+    query_fa = os.path.join(chunk_dir, "query.fa")
+    target_fa = os.path.join(chunk_dir, "target.fa")
+    pairs_tsv = os.path.join(chunk_dir, "pairs.tsv")
+    with open(query_fa, 'w', buffering=BUFFER_SIZE) as fq, open(target_fa, 'w', buffering=BUFFER_SIZE) as ft, open(pairs_tsv, 'w') as fp:
+        for (lp1, lp2) in unique_pairs:
+            # FASTA IDs: use locus IDs (may contain colons; IntaRNA accepts them)
+            fq.write(">" + lp1 + "\n" + d_loci_seqs[lp1] + "\n")
+            ft.write(">" + lp2 + "\n" + d_loci_seqs[lp2] + "\n")
+            fp.write(lp1 + "\t" + lp2 + "\n")
+
+    with open(os.path.join(chunk_dir, "lines.pkl"), 'wb') as f:
+        pickle.dump(lines_with_loci, f)
+    with open(os.path.join(chunk_dir, "loci_seqs.pkl"), 'wb') as f:
+        pickle.dump(d_loci_seqs, f)
+    # So finish phase knows whether IntaRNA was needed
+    with open(os.path.join(chunk_dir, "has_pairs"), 'w') as f:
+        f.write("1" if unique_pairs else "0")
+    return len(unique_pairs)
+
+
+def _parse_intarna_csv_to_hybrids(csv_path, pairs_order):
+    """
+    Parse IntaRNA CSV (; sep, cols id1,start1,start2,hybridDPfull,E).
+    id1=target=locuspos2, id2=query=locuspos1. Return dict (lp1,lp2) -> (dotbracket, pos, energy).
+    pairs_order: list of (locuspos1, locuspos2) in same order as FASTA.
+    """
+    d_hybrids = {}
+    if not os.path.exists(csv_path):
+        return d_hybrids
+    with open(csv_path, 'r') as f:
+        lines = f.readlines()
+    if len(lines) < 2:
+        return d_hybrids
+    # Header: id1;start1;start2;hybridDPfull;E (or similar)
+    for i, line in enumerate(lines[1:], start=0):
+        parts = line.strip().split(";")
+        if len(parts) < 5:
+            continue
+        if i >= len(pairs_order):
+            break
+        lp1, lp2 = pairs_order[i]
+        # id1=target, id2=query -> (id2,id1) = (query,target) = (lp1,lp2) in our convention
+        start1, start2 = parts[1], parts[2]
+        hybrid_dp = parts[3]
+        energy = parts[4]
+        # Swap dot-bracket for query/target to match hybridize_with_intarna convention
+        if "&" in hybrid_dp:
+            target_db, query_db = hybrid_dp.split("&", 1)
+            target_db_swap = target_db.replace("(", ")")
+            query_db_swap = query_db.replace(")", "(")
+            dotbracket = query_db_swap + "&" + target_db_swap
+        else:
+            dotbracket = hybrid_dp
+        pos = start1 + "&" + start2
+        d_hybrids[(lp1, lp2)] = (dotbracket, pos, energy)
+    return d_hybrids
+
+
+def finish_hybridization_write(outdir, n, sample_name, batchtools_work_dir, compress=False):
+    """
+    Phase 3 for batchtools: load saved lines and IntaRNA result CSV, write chimeras-r.<n>.
+    """
+    BUFFER_SIZE = 2 * 1024 * 1024
+    chunk_dir = os.path.join(batchtools_work_dir, str(n))
+    with open(os.path.join(chunk_dir, "lines.pkl"), 'rb') as f:
+        lines_with_loci = pickle.load(f)
+    with open(os.path.join(chunk_dir, "loci_seqs.pkl"), 'rb') as f:
+        d_loci_seqs = pickle.load(f)
+
+    d_hybrids = {}
+    has_pairs_file = os.path.join(chunk_dir, "has_pairs")
+    has_pairs = False
+    if os.path.exists(has_pairs_file):
+        with open(has_pairs_file) as f:
+            has_pairs = f.read().strip() == "1"
+    if has_pairs:
+        pairs_order = []
+        with open(os.path.join(chunk_dir, "pairs.tsv")) as f:
+            for line in f:
+                toks = line.strip().split("\t", 1)
+                if len(toks) >= 2:
+                    pairs_order.append((toks[0], toks[1]))
+        result_csv = os.path.join(chunk_dir, "result.csv")
+        d_hybrids = _parse_intarna_csv_to_hybrids(result_csv, pairs_order)
+
+    output_file = os.path.join(outdir, sample_name + ".chimeras-r." + str(n))
+    with open(output_file, 'w', buffering=BUFFER_SIZE) as fh_out:
+        for line_str, locuspos1, locuspos2 in lines_with_loci:
+            a = line_str.split("\t")
+            seq1 = seq2 = dotbracket = pos = energy = "NA"
             if locuspos1 in d_loci_seqs and locuspos2 in d_loci_seqs:
                 seq1 = d_loci_seqs[locuspos1]
                 seq2 = d_loci_seqs[locuspos2]
                 if (locuspos1, locuspos2) in d_hybrids:
-                    dotbracket, pos, energy = d_hybrids[locuspos1, locuspos2]
-                else:
-                    dotbracket, pos, energy = hybridize_with_intarna(seq1, seq2, intarna_params)
-                    d_hybrids[locuspos1, locuspos2] = dotbracket, pos, energy
-            # Replace the four "NA" fields with actual hybridization data
+                    dotbracket, pos, energy = d_hybrids[(locuspos1, locuspos2)]
             a[CHIMERA_IDX_SEQUENCES] = seq1 + "&" + seq2
             a[CHIMERA_IDX_HYBRID] = dotbracket
             a[CHIMERA_IDX_HYBRID_POS] = pos
             a[CHIMERA_IDX_MFE] = energy
             fh_out.write("\t".join(a) + "\n")
-    os.remove(file_chimeras)
+
+    file_chimeras = os.path.join(outdir, sample_name + ".chimeras." + str(n))
+    if os.path.exists(file_chimeras):
+        os.remove(file_chimeras)
+
+
+def run_batchtools_r_script(args, batchtools_work_dir, batchtools_registry, intarna_params):
+    """
+    Submit IntaRNA jobs via R batchtools (same pattern as chira_map.py).
+    Writes config.json and jobs.json, then calls submit_intarna_batchtools.R.
+    """
+    # Build jobs list: chunk index n, query_fa, target_fa, output_csv (all absolute paths)
+    jobs_data = []
+    for n in sorted([d for d in os.listdir(batchtools_work_dir) if os.path.isdir(os.path.join(batchtools_work_dir, d)) and d.isdigit()], key=int):
+        chunk_dir = os.path.join(batchtools_work_dir, n)
+        has_pairs_path = os.path.join(chunk_dir, "has_pairs")
+        if not os.path.exists(has_pairs_path):
+            continue
+        with open(has_pairs_path) as f:
+            if f.read().strip() != "1":
+                continue
+        query_fa = os.path.abspath(os.path.join(chunk_dir, "query.fa"))
+        target_fa = os.path.abspath(os.path.join(chunk_dir, "target.fa"))
+        output_csv = os.path.abspath(os.path.join(chunk_dir, "result.csv"))
+        jobs_data.append({"n": n, "query_fa": query_fa, "target_fa": target_fa, "output_csv": output_csv})
+    if not jobs_data:
+        return
+
+    reg_dir = os.path.abspath(batchtools_registry)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # Resource defaults (match chira_map.py)
+    cores_per_job = getattr(args, 'batchtools_cores', None) or 8
+    if not getattr(args, 'batchtools_cores', None):
+        print("WARNING: --batchtools_cores not specified. Using default: 8 cores per job.", file=sys.stderr)
+    if getattr(args, 'batchtools_memory', None):
+        mem_match = re.match(r'(\d+)(GB|G|MB|M)', (getattr(args, 'batchtools_memory') or '').upper())
+        if mem_match:
+            mem_value = int(mem_match.group(1))
+            mem_unit = mem_match.group(2)
+            total_gb = mem_value / 1024 if mem_unit in ('MB', 'M') else mem_value
+            memory_per_job = f"{total_gb / cores_per_job:.1f}GB"
+        else:
+            memory_per_job = f"{max(0.5, 4.0 / cores_per_job):.1f}GB"
+    else:
+        memory_per_job = f"{max(0.5, 4.0 / cores_per_job):.1f}GB"
+    walltime = getattr(args, 'batchtools_walltime', None) or "48:00"
+    queue = getattr(args, 'batchtools_queue', None) or "long"
+    conda_env = getattr(args, 'batchtools_conda_env', None) or os.environ.get('CONDA_DEFAULT_ENV', '')
+    if conda_env:
+        conda_env = os.path.expanduser(conda_env)
+    max_parallel = getattr(args, 'batchtools_max_parallel', None) or len(jobs_data)
+    job_name_prefix = f"chira_intarna_{os.path.basename(args.outdir)}_{int(time.time())}"
+
+    # Resolve template (same as chira_map.py)
+    template_file = getattr(args, 'batchtools_template', None) or ''
+    if template_file == 'lsf-simple':
+        pass
+    elif template_file:
+        if not os.path.isabs(template_file):
+            template_file = os.path.join(script_dir, template_file)
+        template_file = os.path.abspath(template_file)
+        if not os.path.exists(template_file):
+            print(f"WARNING: Template not found: {template_file}. Using 'lsf-simple'.", file=sys.stderr)
+            template_file = "lsf-simple"
+    else:
+        default_tmpl = os.path.join(script_dir, "lsf_custom.tmpl")
+        template_file = default_tmpl if os.path.exists(default_tmpl) else "lsf-simple"
+    if template_file != "lsf-simple":
+        template_file = os.path.abspath(template_file)
+
+    config = {
+        "reg_dir": reg_dir,
+        "queue": queue,
+        "cores_per_job": cores_per_job,
+        "memory_per_job": memory_per_job,
+        "walltime": walltime,
+        "conda_env": conda_env,
+        "intarna_params": intarna_params,
+        "job_name_prefix": job_name_prefix,
+        "max_parallel": max_parallel,
+        "template_file": template_file,
+    }
+
+    config_file = os.path.abspath(os.path.join(batchtools_work_dir, "config.json"))
+    jobs_file = os.path.abspath(os.path.join(batchtools_work_dir, "jobs.json"))
+    with open(config_file, 'w', encoding='utf-8') as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
+    with open(jobs_file, 'w', encoding='utf-8') as f:
+        json.dump(jobs_data, f, indent=2, ensure_ascii=False)
+
+    r_script = os.path.join(script_dir, "submit_intarna_batchtools.R")
+    if not os.path.exists(r_script):
+        raise FileNotFoundError(f"R script not found: {r_script}")
+
+    cmd = ["Rscript", r_script, config_file, jobs_file]
+    print("Submitting IntaRNA jobs via batchtools (chira_map pattern): " + " ".join(cmd), file=sys.stderr)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=86400, cwd=script_dir)
+    if result.returncode != 0:
+        sys.stderr.write(result.stderr or "")
+        raise RuntimeError(f"batchtools R script failed with code {result.returncode}. stderr: {result.stderr!r}")
+
+
+def run_batchtools_hybridization(args, common_intarna_params, batchtools_work_dir, batchtools_registry):
+    """Run hybridization using batchtools: prepare (MPIRE) -> R batchtools -> finish (MPIRE)."""
+    # Phase 1: prepare FASTA and manifests per chunk
+    prep_args = [(
+        args.outdir,
+        common_intarna_params,
+        str(k),
+        args.sample_name,
+        batchtools_work_dir
+    ) for k in range(args.processes)]
+    with WorkerPool(n_jobs=args.processes) as pool:
+        pool.map(prepare_hybridization_batch, prep_args, progress_bar=False)
+    # Phase 2: run R batchtools (submits to cluster, waits for completion; same pattern as chira_map)
+    run_batchtools_r_script(args, batchtools_work_dir, batchtools_registry, common_intarna_params)
+    # Phase 3: write final output from result CSVs
+    finish_args = [(
+        args.outdir,
+        str(k),
+        args.sample_name,
+        batchtools_work_dir,
+        args.compress
+    ) for k in range(args.processes)]
+    with WorkerPool(n_jobs=args.processes) as pool:
+        pool.map(finish_hybridization_write, finish_args, progress_bar=False)
 
 
 def parse_annotations(f_gtf):
@@ -1397,8 +1602,8 @@ def print_configuration(args):
 
 def setup_references(args):
     """Extract reference lengths from fasta files."""
-    d_reflen1 = defaultdict()
-    d_reflen2 = defaultdict()
+    d_reflen1 = {}
+    d_reflen2 = {}
     chira_utilities.extract_reflengths(args.ref_fasta1, d_reflen1)
     if args.ref_fasta2:
         chira_utilities.extract_reflengths(args.ref_fasta2, d_reflen2)
@@ -1550,60 +1755,55 @@ def build_intarna_params(args):
     noseed_param = ""
     if args.no_seed:
         noseed_param = "--noSeed"
-    return " ".join(["--outMode C", "--outCsvCols id1,start1,start2,hybridDPfull,E",
-                     noseed_param, "-m", args.intarna_mode, "--acc", args.accessibility,
-                     "--temperature", str(args.temperature), "--seedBP", str(args.seed_bp),
-                     "--seedMinPu", str(args.seed_min_pu), "--accW", str(args.acc_width)])
+    parts = ["--outMode C", "--outCsvCols id1,start1,start2,hybridDPfull,E",
+             noseed_param, "-m", args.intarna_mode, "--acc", args.accessibility,
+             "--temperature", str(args.temperature), "--seedBP", str(args.seed_bp),
+             "--seedMinPu", str(args.seed_min_pu), "--accW", str(args.acc_width)]
+    # IntaRNA multithreading: parallelize predictions (or window combos when single pair)
+    if getattr(args, 'intarna_threads', 1) != 1:
+        parts.append("--threads")
+        parts.append(str(args.intarna_threads))
+    return " ".join(parts)
 
 
 def run_hybridization(args):
-    """Run hybridization process if enabled."""
+    """Run hybridization process if enabled. Requires --use_batchtools."""
+    use_batchtools = getattr(args, 'use_batchtools', False)
+    if not use_batchtools:
+        raise RuntimeError(
+            "Hybridization requires --use_batchtools. "
+            "IntaRNA jobs must be submitted to the HPC cluster via batchtools."
+        )
+
     chimeras_prefix = os.path.join(args.outdir, args.sample_name + ".chimeras-r")
     f_reference = prepare_reference_file(args)
-    
+
     # Extract FASTA sequences for loci
     extract_loci_sequences(args, f_reference)
-    
+
     # Build IntaRNA parameters
     common_intarna_params = build_intarna_params(args)
-    
-    # Run hybridization in parallel using MPIRE
-    # Use tuples instead of dictionaries to avoid MPIRE unpacking issues
-    hybridization_args = []
-    for k in range(args.processes):
-        hybridization_args.append((
-            args.outdir,  # outdir
-            common_intarna_params,  # intarna_params
-            str(k),  # n
-            args.sample_name,  # sample_name
-            args.compress  # compress
-        ))
-    
-    def process_hybridization(outdir, intarna_params, n, sample_name, compress):
-        """Wrapper function to process hybridization with MPIRE."""
-        return hybridize_and_write(
-            outdir,
-            intarna_params,
-            n,
-            sample_name,
-            compress
-        )
-    
-    with WorkerPool(n_jobs=args.processes) as pool:
-        pool.map(process_hybridization, hybridization_args, progress_bar=False)
+    batchtools_work_dir = os.path.join(args.outdir, "batchtools_work")
+    batchtools_registry = getattr(args, 'batchtools_registry', None) or os.path.join(batchtools_work_dir, "registry")
+    os.makedirs(batchtools_work_dir, exist_ok=True)
+    run_batchtools_hybridization(args, common_intarna_params, batchtools_work_dir, batchtools_registry)
+    if not getattr(args, 'keep_batchtools_work', False):
+        if os.path.exists(batchtools_work_dir):
+            shutil.rmtree(batchtools_work_dir, ignore_errors=True)
 
     # Cleanup intermediate files
     for k in range(args.processes):
-        os.remove(os.path.join(args.outdir, "loci.fa.") + str(k))
-        os.remove(os.path.join(args.outdir, "loci.bed.") + str(k))
+        for suf in ("loci.fa.", "loci.bed."):
+            p = os.path.join(args.outdir, suf + str(k))
+            if os.path.exists(p):
+                os.remove(p)
 
-    # Remove temporary reference file if we created it
     if not args.f_ref:
         if os.path.exists(f_reference):
             os.remove(f_reference)
         if os.path.exists(f_reference + ".fai"):
             os.remove(f_reference + ".fai")
-    
+
     return chimeras_prefix
 
 
@@ -1737,6 +1937,46 @@ def parse_arguments():
     parser.add_argument('-accw', '--acc_width', action='store', type=int, default=150, metavar='',
                         dest='acc_width', choices=range(0, 99999),
                         help='IntaRNA --accW parameter:  sliding window size for accessibility computation')
+
+    parser.add_argument('--intarna_threads', action='store', type=int, default=1, metavar='',
+                        dest='intarna_threads',
+                        help='IntaRNA --threads: threads per process (0=all available). '
+                             'Total CPU use is processes * intarna_threads. Default: 1')
+
+    parser.add_argument('--use_batchtools', action='store_true', dest='use_batchtools',
+                        help='Use R batchtools to submit IntaRNA jobs to HPC cluster (batch FASTA per chunk). '
+                             'Same pattern as chira_map.py. Requires R with batchtools and IntaRNA on cluster PATH.')
+
+    parser.add_argument('--batchtools_registry', action='store', dest='batchtools_registry', default=None, metavar='',
+                        help='Directory for batchtools registry (default: <outdir>/batchtools_work/registry)')
+
+    parser.add_argument('--batchtools_template', action='store', dest='batchtools_template', default='', metavar='',
+                        help='Path to batchtools LSF template file (or "lsf-simple" for built-in). '
+                             'Default: lsf_custom.tmpl next to chira_extract.py if present.')
+
+    parser.add_argument('--batchtools_queue', action='store', dest='batchtools_queue', default='long', metavar='',
+                        help='LSF queue name for batchtools jobs (default: long)')
+
+    parser.add_argument('--batchtools_cores', action='store', type=int, default=None, metavar='',
+                        dest='batchtools_cores',
+                        help='Cores per batchtools job (default: 8)')
+
+    parser.add_argument('--batchtools_memory', action='store', dest='batchtools_memory', default=None, metavar='',
+                        help='Total memory per job (e.g. 8GB, 64GB). Converted to per-core for LSF.')
+
+    parser.add_argument('--batchtools_walltime', action='store', dest='batchtools_walltime', default='48:00', metavar='',
+                        help='Walltime per job (e.g. 48:00 or 240:00)')
+
+    parser.add_argument('--batchtools_conda_env', action='store', dest='batchtools_conda_env', default=None, metavar='',
+                        help='Conda environment path for cluster jobs (optional)')
+
+    parser.add_argument('--batchtools_max_parallel', action='store', type=int, default=None, metavar='',
+                        dest='batchtools_max_parallel',
+                        help='Max concurrent batchtools jobs (default: all chunks at once)')
+
+    parser.add_argument('--keep_batchtools_work', action='store_true', dest='keep_batchtools_work',
+                        help='Keep batchtools work dir (config.json, jobs.json, chunk dirs, registry) for debugging. '
+                             'Default: remove after successful completion.')
 
     parser.add_argument('-f1', '--ref_fasta1', action='store', dest='ref_fasta1', required=True,
                         metavar='', help='First priority fasta file')
